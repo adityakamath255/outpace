@@ -1,0 +1,184 @@
+Screen {
+    background: ansi_default;
+    color: ansi_default;
+}
+
+#heading {
+    height: 3;
+    padding: 1 2 0 2;
+}
+
+#wordmark {
+    width: 12;
+    color: ansi_cyan;
+    text-style: bold;
+}
+
+#date {
+    width: 1fr;
+    text-align: right;
+}
+
+#overview {
+    height: 6;
+    margin: 0 1;
+}
+
+.metric {
+    width: 1fr;
+    height: 5;
+    border-left: solid ansi_cyan;
+    padding: 0 1;
+    margin: 1;
+}
+
+#body {
+    height: 1fr;
+    margin: 0 2;
+}
+
+#task-pane {
+    width: 2fr;
+    min-width: 30;
+}
+
+#columns {
+    height: 2;
+    color: ansi_bright_black;
+}
+
+#tasks {
+    height: 1fr;
+    border: none;
+    background: ansi_default;
+    padding: 0;
+}
+
+#tasks:focus {
+    border: none;
+}
+
+#tasks > .option-list--option {
+    padding: 0 1;
+}
+
+#tasks > .option-list--option-highlighted {
+    background: ansi_blue;
+    color: ansi_bright_white;
+    text-style: bold;
+}
+
+#tasks > .option-list--option-disabled {
+    color: ansi_cyan;
+    text-style: bold;
+    opacity: 100%;
+    padding: 1 1 0 1;
+}
+
+#sidebar {
+    width: 32;
+    margin-left: 2;
+    padding-left: 2;
+    border-left: solid ansi_bright_black;
+}
+
+#sidebar Static {
+    height: auto;
+    margin-bottom: 1;
+}
+
+#task-buttons {
+    height: 3;
+}
+
+#task-buttons Button {
+    min-width: 8;
+    width: 1fr;
+    margin-right: 1;
+}
+
+#status {
+    height: 1;
+    margin: 1 2 0 2;
+    color: ansi_bright_black;
+}
+
+Footer {
+    background: ansi_default;
+}
+
+Screen.compact #body {
+    layout: vertical;
+}
+
+Screen.compact #task-pane {
+    width: 1fr;
+    height: 2fr;
+}
+
+Screen.compact #sidebar {
+    width: 1fr;
+    height: 1fr;
+    margin: 1 0 0 0;
+    padding: 0;
+    border-left: none;
+    border-top: solid ansi_bright_black;
+}
+
+ModalScreen {
+    align: center middle;
+    background: ansi_default;
+}
+
+.dialog {
+    width: 62;
+    max-width: 95%;
+    height: auto;
+    max-height: 95%;
+    border: round ansi_cyan;
+    padding: 1 2;
+    background: ansi_default;
+}
+
+.dialog-title {
+    text-style: bold;
+    color: ansi_cyan;
+    margin-bottom: 1;
+}
+
+.field-label {
+    margin-top: 1;
+}
+
+.dialog Input, .dialog Select {
+    width: 1fr;
+}
+
+.fields {
+    height: 5;
+}
+
+.fields Vertical {
+    width: 1fr;
+    height: auto;
+    margin-right: 1;
+}
+
+.dialog-buttons {
+    height: 3;
+    align-horizontal: right;
+    margin-top: 1;
+}
+
+.dialog-buttons Button {
+    margin-left: 1;
+}
+
+.muted {
+    color: ansi_bright_black;
+}
+
+#error {
+    height: auto;
+    color: ansi_red;
+}
