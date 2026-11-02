@@ -42,13 +42,13 @@ def test_failed_write_rolls_back_without_touching_other_days(tmp_path):
     assert store.load(tomorrow.date) == tomorrow
 
 
-def test_import_cannot_replace_an_existing_day(tmp_path):
+def test_creation_cannot_replace_an_existing_day(tmp_path):
     store = Store(tmp_path / "todo.sqlite3")
     original = empty_day(DAY)
     store.save(original)
-    imported = replace(original, sections=(Section("Imported"),))
+    replacement = replace(original, sections=(Section("Replacement"),))
     with pytest.raises(ValueError, match="already exists"):
-        store.save(imported)
+        store.save(replacement)
     assert store.load(DAY) == original
 
 
@@ -76,3 +76,27 @@ def test_stale_save_cannot_overwrite_newer_edits(tmp_path):
     with pytest.raises(ValueError, match="changed"):
         store.save(stale, expected=original)
     assert store.load(DAY) == current
+
+
+def test_delete_requires_matching_snapshot_and_preserves_other_days(tmp_path):
+    store = Store(tmp_path / "todo.sqlite3")
+    original = replace(
+        empty_day(DAY), sections=(Section("Tasks", (Task("Practice", points("2")),)),)
+    )
+    other = empty_day(date(2026, 11, 2))
+    store.save(original)
+    store.save(other)
+    changed = replace(
+        original, sections=(replace(original.sections[0], title="Changed"),)
+    )
+    store.save(changed, expected=original)
+    with pytest.raises(ValueError, match="changed"):
+        store.delete(original)
+    assert store.load(DAY) == changed
+    store.delete(changed)
+    assert store.load(DAY) is None
+    assert store.load(other.date) == other
+    with store.connect() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+    store.save(original)
+    assert store.load(DAY) == original

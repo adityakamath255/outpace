@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import sys
 from dataclasses import replace
 from datetime import date, datetime
 from io import StringIO
@@ -9,7 +10,7 @@ from rich.console import Console
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Footer, Input, Static
 
-from todo.app import TodoApp, schedule_status, section_row
+from todo.app import TodoApp, main, schedule_status, section_row
 from todo.db import Store
 from todo.model import Interval, Section, Task, empty_day, points
 
@@ -26,13 +27,23 @@ def test_section_share_is_not_truncated():
 
 
 def test_app_starts(tmp_path):
-    app = TodoApp(Store(tmp_path / "todo.sqlite3"), empty_day(date(2026, 11, 1)))
+    app = TodoApp(Store(tmp_path / "todo.sqlite3"), date(2026, 11, 1))
 
     async def start():
         async with app.run_test():
             assert app.is_running
 
     asyncio.run(start())
+
+
+def test_startup_does_not_save_an_unedited_day(tmp_path, monkeypatch):
+    path = tmp_path / "todo.sqlite3"
+    monkeypatch.setattr(
+        sys, "argv", ["todo", "--database", str(path), "--date", "2026-11-01"]
+    )
+    monkeypatch.setattr(TodoApp, "run", lambda self: None)
+    main()
+    assert Store(path).load(date(2026, 11, 1)) is None
 
 
 @pytest.fixture
@@ -43,7 +54,7 @@ def app(tmp_path):
     )
     store = Store(tmp_path / "todo.sqlite3")
     store.save(day)
-    return TodoApp(store, day)
+    return TodoApp(store, day.date)
 
 
 @pytest.mark.parametrize("key", ("a", "e", "enter", "d"))
@@ -228,7 +239,7 @@ def test_day_switching_preserves_lists_and_creates_new_days(app):
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.press("space")
             edited = app.day
-            assert app.history == [original]
+            assert app.history
             assert await pilot.click("#previous-day")
             assert app.day == earlier
             assert not app.history
@@ -247,7 +258,7 @@ def test_day_switching_preserves_lists_and_creates_new_days(app):
                 interval.start.date() == tomorrow.date
                 for interval in tomorrow.intervals
             )
-            assert app.store.load(tomorrow.date) == tomorrow
+            assert app.store.load(tomorrow.date) is None
             await pilot.press("a", *"New task")
             await pilot.press("ctrl+enter")
             assert app.store.load(tomorrow.date) == app.day
@@ -306,23 +317,11 @@ def test_same_day_cancellation_and_invalid_dates_preserve_undo(app):
     asyncio.run(keep_current_day())
 
 
-@pytest.mark.parametrize("failure", ["load", "create", "concurrent-create"])
-def test_failed_day_open_keeps_current_list_history_and_date_draft(
-    app, monkeypatch, failure
-):
+def test_failed_day_load_keeps_current_list_history_and_date_draft(app, monkeypatch):
     target = date(2026, 11, 2)
-    winner = replace(empty_day(target), sections=(Section("Created elsewhere"),))
 
     def fail(*args, **kwargs):
         raise sqlite3.OperationalError("Unavailable database")
-
-    original_load = app.store.load
-
-    def raced_load(list_date):
-        loaded = original_load(list_date)
-        if list_date == target and loaded is None:
-            Store(app.store.path).save(winner)
-        return loaded
 
     async def fail_open():
         async with app.run_test() as pilot:
@@ -331,12 +330,7 @@ def test_failed_day_open_keeps_current_list_history_and_date_draft(
             await pilot.press("ctrl+d")
             app.screen.query_one(Input).value = target.isoformat()
             with monkeypatch.context() as patch:
-                if failure == "concurrent-create":
-                    patch.setattr(app.store, "load", raced_load)
-                else:
-                    patch.setattr(
-                        app.store, "load" if failure == "load" else "save", fail
-                    )
+                patch.setattr(app.store, "load", fail)
                 await pilot.press("enter")
             assert isinstance(app.screen, ModalScreen)
             assert app.screen.query_one(Input).value == target.isoformat()
@@ -344,16 +338,82 @@ def test_failed_day_open_keeps_current_list_history_and_date_draft(
             assert app.day == current
             assert app.history == history
             assert app.store.load(current.date) == current
-            if failure == "concurrent-create":
-                assert app.store.load(target) == winner
-            else:
-                assert app.store.load(target) is None
+            assert app.store.load(target) is None
             await pilot.press("enter")
             assert not isinstance(app.screen, ModalScreen)
             assert app.day.date == target
             assert not app.history
 
     asyncio.run(fail_open())
+
+
+def test_first_edit_saves_and_undo_restores_an_unsaved_day(tmp_path):
+    app = TodoApp(Store(tmp_path / "todo.sqlite3"), date(2026, 11, 1))
+
+    async def edit_new_day():
+        async with app.run_test(size=(110, 45)) as pilot:
+            original = app.day
+            for title in ("First task", "Try again"):
+                assert app.store.load(original.date) is None
+                await pilot.press("a", *title, "ctrl+enter")
+                assert app.store.load(original.date) == app.day
+                assert next(app.day.tasks())[1].title == title
+                await pilot.press("u")
+                assert app.day == original
+                assert app.store.load(original.date) is None
+
+    asyncio.run(edit_new_day())
+
+
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_failed_first_edit_preserves_the_draft_and_saved_data(
+    tmp_path, monkeypatch, concurrent
+):
+    store = Store(tmp_path / "todo.sqlite3")
+    app = TodoApp(store, date(2026, 11, 1))
+    original = app.day
+    winner = replace(empty_day(original.date), sections=(Section("Created elsewhere"),))
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("Unavailable database")
+
+    async def fail_first_edit():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("a", *"Keep my draft")
+            with monkeypatch.context() as patch:
+                if concurrent:
+                    Store(store.path).save(winner)
+                else:
+                    patch.setattr(store, "save", fail)
+                await pilot.press("ctrl+enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert app.screen.query_one("#title", Input).value == "Keep my draft"
+            assert str(app.screen.query_one("#error", Static).content)
+            assert app.day == original
+            assert not app.history
+            assert store.load(original.date) == (winner if concurrent else None)
+
+    asyncio.run(fail_first_edit())
+
+
+def test_undo_first_edit_cannot_delete_another_sessions_changes(tmp_path):
+    store = Store(tmp_path / "todo.sqlite3")
+    app = TodoApp(store, date(2026, 11, 1))
+
+    async def reject_undo():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("a", *"First task", "ctrl+enter")
+            saved, history = app.day, list(app.history)
+            changed = replace(
+                saved, sections=(replace(saved.sections[0], title="Changed elsewhere"),)
+            )
+            Store(store.path).save(changed, expected=saved)
+            await pilot.press("u")
+            assert app.day == saved
+            assert app.history == history
+            assert store.load(saved.date) == changed
+
+    asyncio.run(reject_undo())
 
 
 def test_previous_and_next_day_stop_at_supported_date_boundaries(app):

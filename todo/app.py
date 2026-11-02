@@ -33,7 +33,6 @@ from .model import (
     Task,
     duration,
     empty_day,
-    import_markdown,
     number,
     parse_interval,
     per_point,
@@ -101,14 +100,6 @@ def schedule_status(intervals: tuple[Interval, ...], now: datetime) -> str:
     if any(interval.start <= now < interval.end for interval in intervals):
         return "In progress"
     return "Between intervals"
-
-
-def load_or_create_day(store: Store, list_date: date) -> Day:
-    day = store.load(list_date)
-    if day is None:
-        day = empty_day(list_date)
-        store.save(day)
-    return day
 
 
 class TaskList(OptionList):
@@ -468,11 +459,16 @@ class TodoApp(App):
         Binding("ctrl+q", "quit", "Quit", show=False),
     ]
 
-    def __init__(self, store: Store, day: Day):
+    def __init__(self, store: Store, list_date: date):
         super().__init__(ansi_color=True)
         self.store = store
-        self.day = day
-        self.history: list[Day] = []
+        self._load_day(list_date)
+        self.history: list[tuple[Day, bool]] = []
+
+    def _load_day(self, list_date: date) -> None:
+        saved = self.store.load(list_date)
+        self.day = saved if saved is not None else empty_day(list_date)
+        self.persisted = saved is not None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="day-bar"):
@@ -595,8 +591,7 @@ class TodoApp(App):
     def switch_day(self, list_date: date) -> None:
         if list_date == self.day.date:
             return
-        day = load_or_create_day(self.store, list_date)
-        self.day = day
+        self._load_day(list_date)
         self.history.clear()
         self.query_one("#tasks", TaskList).highlighted = None
         self.redraw()
@@ -777,9 +772,10 @@ class TodoApp(App):
     def save_change(self, day: Day, message: str, task_id: str | None = None) -> None:
         if day == self.day:
             return
-        self.store.save(day, expected=self.day)
-        self.history.append(self.day)
+        self.store.save(day, expected=self.day if self.persisted else None)
+        self.history.append((self.day, self.persisted))
         self.day = day
+        self.persisted = True
         self.redraw(task_id)
         self.query_one("#status", Static).update(message)
 
@@ -833,14 +829,18 @@ class TodoApp(App):
         if not self.history:
             self.query_one("#status", Static).update("Nothing to undo.")
             return
-        previous = self.history[-1]
+        previous, was_persisted = self.history[-1]
         try:
-            self.store.save(previous, expected=self.day)
+            if was_persisted:
+                self.store.save(previous, expected=self.day)
+            else:
+                self.store.delete(self.day)
         except (ValueError, sqlite3.Error, OSError) as error:
             self.notify(str(error), title="Could not undo", severity="error", timeout=8)
             return
         self.history.pop()
         self.day = previous
+        self.persisted = was_persisted
         self.redraw()
         self.query_one("#status", Static).update("Last change undone.")
 
@@ -869,27 +869,10 @@ def main() -> None:
         default=date.today(),
         help="list date, YYYY-MM-DD (default: today)",
     )
-    parser.add_argument(
-        "--import",
-        dest="import_path",
-        type=Path,
-        help="import Markdown into a day that has not been created yet",
-    )
     args = parser.parse_args()
     try:
-        imported = (
-            import_markdown(
-                args.import_path.expanduser().read_text(encoding="utf-8"), args.date
-            )
-            if args.import_path
-            else None
-        )
         store = Store(args.database.expanduser())
-        if imported is not None:
-            store.save(imported)
-            day = imported
-        else:
-            day = load_or_create_day(store, args.date)
+        app = TodoApp(store, args.date)
     except (ValueError, sqlite3.Error, OSError) as error:
         parser.exit(2, f"todo: {error}\n")
-    TodoApp(store, day).run()
+    app.run()

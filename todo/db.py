@@ -95,17 +95,24 @@ class Store:
             sections.append(Section(title, tasks, section_id))
         return Day(day, intervals, tuple(sections))
 
+    def _expect_day(
+        self, connection: sqlite3.Connection, list_date: date, expected: Day | None
+    ) -> Day | None:
+        current = self._load(connection, list_date)
+        if current != expected:
+            detail = (
+                f"The list for {list_date} already exists. "
+                if expected is None
+                else "This list changed in another session. "
+            )
+            raise ValueError(detail + "Switch to another day and back to reload it.")
+        return current
+
     def save(self, day: Day, *, expected: Day | None = None) -> None:
+        # expected=None requires absence; otherwise the stored snapshot must match
         with self.connect() as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
-            current = self._load(connection, day.date)
-            if current != expected:
-                if expected is None:
-                    raise ValueError(f"The list for {day.date} already exists.")
-                raise ValueError(
-                    "This list changed in another session. "
-                    "Switch to another day and back to reload it."
-                )
+            current = self._expect_day(connection, day.date, expected)
             if current is None:
                 connection.execute(
                     "INSERT INTO days VALUES (?)", (day.date.isoformat(),)
@@ -149,3 +156,11 @@ class Store:
                         for position, task in enumerate(section.tasks)
                     ),
                 )
+
+    def delete(self, expected: Day) -> None:
+        with self.connect() as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._expect_day(connection, expected.date, expected)
+            connection.execute(
+                "DELETE FROM days WHERE date = ?", (expected.date.isoformat(),)
+            )

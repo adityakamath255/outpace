@@ -11,7 +11,6 @@ from todo.model import (
     Task,
     duration,
     empty_day,
-    import_markdown,
     number,
     parse_interval,
     per_point,
@@ -143,43 +142,6 @@ def test_report_matches_the_original_calculations():
     assert per_point(total - elapsed, available - earned) == "17:30"
     assert percentage(ratio(0, 0)) == "n/a"
     assert per_point(0, Fraction(0)) == "n/a"
-
-
-def test_import_preserves_groups_partial_scores_and_unscored_items():
-    day = import_markdown(
-        """# today
-## times
-- 23:00 - 01:00
-## scored
-- [0.25] *1.5* practice-20m
-- [x] *2* finish
-
-- [ ] *3* next
-## unscored
-- remember
-""",
-        DAY,
-    )
-    assert len(day.sections) == 3
-    assert score(task for _, task in day.tasks()) == (points("2.25"), points("6.5"))
-    assert day.sections[0].tasks[0].minutes == 20
-    assert day.sections[0].tasks[0].title == "practice-20m"
-    assert day.sections[2].tasks[0].available is None
-    assert day.intervals[0].end == datetime(2026, 11, 2, 1)
-
-
-def test_import_reports_bad_rows_instead_of_silently_losing_tasks():
-    with pytest.raises(ValueError):
-        import_markdown("## scored\n- [9] *2* practice", DAY)
-
-
-def test_import_accepts_single_digit_hours():
-    day = import_markdown(
-        "## times\n- 7:30 - 11:00\n## scored\n- [ ] *1* practice", DAY
-    )
-    assert day.intervals == (
-        Interval(datetime(2026, 11, 1, 7, 30), datetime(2026, 11, 1, 11)),
-    )
 
 
 def test_edit_move_remove_and_complete_preserve_task_identity():

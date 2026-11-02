@@ -7,7 +7,7 @@ name = "todo-tui"
 version = "0.1.0"
 description = "A daily task list with points and a scheduled day."
 requires-python = ">=3.14"
-dependencies = ["textual>=8.2.8,<9", "platformdirs>=4,<5"]
+dependencies = ["textual>=8.2.8,<9", "platformdirs>=4,<5", "rich"]
 
 [project.scripts]
 todo = "todo.app:main"
