@@ -1,4 +1,5 @@
 import asyncio
+import sqlite3
 from dataclasses import replace
 from datetime import date, datetime
 from io import StringIO
@@ -8,7 +9,7 @@ from rich.console import Console
 from textual.screen import ModalScreen
 from textual.widgets import Button, Checkbox, Footer, Input, Static
 
-from todo.app import TodoApp, section_row
+from todo.app import TodoApp, schedule_status, section_row
 from todo.db import Store
 from todo.model import Interval, Section, Task, empty_day, points
 
@@ -173,6 +174,203 @@ def test_failed_save_keeps_form_and_does_not_change_history(app):
     asyncio.run(fail_save())
 
 
+def test_ended_schedule_is_explained_instead_of_showing_zero_remaining(
+    app, monkeypatch
+):
+    class Clock:
+        @staticmethod
+        def now():
+            return datetime(2026, 11, 2, 8)
+
+    monkeypatch.setattr("todo.app.datetime", Clock)
+
+    async def check_ended_schedule():
+        async with app.run_test():
+            assert "Schedule ended" in str(app.query_one("#time", Static).content)
+            assert "Remaining / point Ended" in str(
+                app.query_one("#pace", Static).content
+            )
+
+    asyncio.run(check_ended_schedule())
+
+
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        (datetime(2026, 11, 1, 7), "Not started"),
+        (datetime(2026, 11, 1, 7, 30), "In progress"),
+        (datetime(2026, 11, 1, 11), "Between intervals"),
+        (datetime(2026, 11, 1, 23), "Schedule ended"),
+    ],
+)
+def test_schedule_status_uses_intervals_instead_of_the_list_date(now, expected):
+    intervals = tuple(reversed(empty_day(date(2026, 11, 1)).intervals))
+    assert schedule_status(intervals, now) == expected
+
+
+def test_overnight_and_unscheduled_lists_have_distinct_statuses():
+    now = datetime(2026, 11, 2, 0, 30)
+    overnight = (Interval(datetime(2026, 11, 1, 23), datetime(2026, 11, 2, 1)),)
+    assert schedule_status(overnight, now) == "In progress"
+    assert schedule_status((), now) == "No schedule"
+
+
+def test_day_switching_preserves_lists_and_creates_new_days(app):
+    original = app.day
+    earlier = replace(
+        empty_day(date(2026, 10, 31)),
+        intervals=(Interval(datetime(2026, 10, 31, 23), datetime(2026, 11, 1, 1)),),
+        sections=(Section("Earlier", (Task("Previous task", points("1")),)),),
+    )
+    app.store.save(earlier)
+
+    async def switch_days():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("space")
+            edited = app.day
+            assert app.history == [original]
+            assert await pilot.click("#previous-day")
+            assert app.day == earlier
+            assert not app.history
+            assert earlier.date.isoformat() in str(
+                app.query_one("#choose-day", Button).label
+            )
+            assert app.store.load(original.date) == edited
+
+            await pilot.press("]")
+            assert app.day == edited
+            await pilot.press("]")
+            tomorrow = app.day
+            assert tomorrow.date == date(2026, 11, 2)
+            assert not list(tomorrow.tasks())
+            assert all(
+                interval.start.date() == tomorrow.date
+                for interval in tomorrow.intervals
+            )
+            assert app.store.load(tomorrow.date) == tomorrow
+            await pilot.press("a", *"New task")
+            await pilot.press("ctrl+enter")
+            assert app.store.load(tomorrow.date) == app.day
+            assert next(app.day.tasks())[1].title == "New task"
+
+            await pilot.press("ctrl+d", *original.date.isoformat())
+            assert await pilot.click("#open")
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day == edited
+            assert not app.history
+            assert app.focused.id == "tasks"
+            assert app.store.load(earlier.date) == earlier
+            assert app.store.load(original.date) == edited
+            await pilot.press("u")
+            assert app.day == edited
+            assert app.store.load(original.date) == edited
+
+            await pilot.press("t")
+            assert app.day.date == date.today()
+            await pilot.press("[")
+            assert await pilot.click("#today")
+            assert app.day.date == date.today()
+
+    asyncio.run(switch_days())
+
+
+def test_same_day_cancellation_and_invalid_dates_preserve_undo(app):
+    async def keep_current_day():
+        async with app.run_test(size=(60, 24)) as pilot:
+            await pilot.press("space")
+            current, history = app.day, list(app.history)
+            assert await pilot.click("#choose-day")
+            await pilot.press("enter")
+            assert app.day == current
+            assert app.history == history
+            await pilot.press("ctrl+d")
+            for invalid in ("2026-02-30", "20261102"):
+                app.screen.query_one(Input).value = invalid
+                await pilot.press("enter")
+                assert isinstance(app.screen, ModalScreen)
+                assert app.screen.query_one(Input).value == invalid
+                assert "YYYY-MM-DD" in str(
+                    app.screen.query_one("#error", Static).content
+                )
+                assert app.day == current
+                assert app.history == history
+            await pilot.press("escape")
+            assert app.day == current
+            assert app.history == history
+
+            await pilot.press("e", "[", "]", "t", "ctrl+d")
+            assert app.screen.query_one("#task-dialog")
+            assert app.day == current
+            await pilot.press("escape")
+
+    asyncio.run(keep_current_day())
+
+
+@pytest.mark.parametrize("failure", ["load", "create", "concurrent-create"])
+def test_failed_day_open_keeps_current_list_history_and_date_draft(
+    app, monkeypatch, failure
+):
+    target = date(2026, 11, 2)
+    winner = replace(empty_day(target), sections=(Section("Created elsewhere"),))
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("Unavailable database")
+
+    original_load = app.store.load
+
+    def raced_load(list_date):
+        loaded = original_load(list_date)
+        if list_date == target and loaded is None:
+            Store(app.store.path).save(winner)
+        return loaded
+
+    async def fail_open():
+        async with app.run_test() as pilot:
+            await pilot.press("space")
+            current, history = app.day, list(app.history)
+            await pilot.press("ctrl+d")
+            app.screen.query_one(Input).value = target.isoformat()
+            with monkeypatch.context() as patch:
+                if failure == "concurrent-create":
+                    patch.setattr(app.store, "load", raced_load)
+                else:
+                    patch.setattr(
+                        app.store, "load" if failure == "load" else "save", fail
+                    )
+                await pilot.press("enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert app.screen.query_one(Input).value == target.isoformat()
+            assert str(app.screen.query_one("#error", Static).content)
+            assert app.day == current
+            assert app.history == history
+            assert app.store.load(current.date) == current
+            if failure == "concurrent-create":
+                assert app.store.load(target) == winner
+            else:
+                assert app.store.load(target) is None
+            await pilot.press("enter")
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day.date == target
+            assert not app.history
+
+    asyncio.run(fail_open())
+
+
+def test_previous_and_next_day_stop_at_supported_date_boundaries(app):
+    async def check_boundaries():
+        async with app.run_test() as pilot:
+            app.switch_day(date.min)
+            await pilot.press("[")
+            assert app.day.date == date.min
+            assert app.query_one("#previous-day", Button).disabled
+            app.switch_day(date.max)
+            await pilot.press("]")
+            assert app.day.date == date.max
+            assert app.query_one("#next-day", Button).disabled
+
+    asyncio.run(check_boundaries())
+
+
 def test_schedule_edit_saves_recalculates_and_undoes(app):
     original = app.day
 
@@ -240,6 +438,9 @@ def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):
                 await pilot.pause()
             await pilot.press("ctrl+enter")
             assert app.day.intervals == ()
+            assert "Remaining / point n/a" in str(
+                app.query_one("#pace", Static).content
+            )
             assert Store(app.store.path).load(app.day.date) == app.day
             await pilot.press("s")
             assert app.focused.id == "add-interval"

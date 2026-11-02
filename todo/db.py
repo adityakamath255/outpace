@@ -103,7 +103,8 @@ class Store:
                 if expected is None:
                     raise ValueError(f"The list for {day.date} already exists.")
                 raise ValueError(
-                    "This list changed in another session. Reopen it before saving."
+                    "This list changed in another session. "
+                    "Switch to another day and back to reload it."
                 )
             if current is None:
                 connection.execute(

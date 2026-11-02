@@ -3,28 +3,36 @@ Screen {
     color: ansi_default;
 }
 
-#view-switch {
-    display: none;
+#day-bar {
     height: 1;
-    margin: 0 1 1 1;
+    margin: 1 1 0 1;
 }
 
-#view-title {
-    width: 1fr;
-    text-style: bold;
-    color: ansi_cyan;
-}
-
-#toggle-view {
+#day-bar Button {
     min-width: 0;
     width: auto;
     color: ansi_cyan;
     background: ansi_default;
 }
 
+#day-bar #choose-day {
+    width: 1fr;
+    text-align: left;
+    text-style: bold underline;
+}
+
+#day-bar Button:hover,
+#day-bar Button:focus {
+    text-style: reverse;
+}
+
+#day-bar #toggle-view {
+    display: none;
+}
+
 #body {
     height: 1fr;
-    margin: 1 1 0 1;
+    margin: 0 1;
 }
 
 #task-pane {
@@ -133,14 +141,8 @@ FooterKey > .footer-key--description {
     background: ansi_default;
 }
 
-Screen.compact #view-switch {
+Screen.compact #day-bar #toggle-view {
     display: block;
-    margin-top: 1;
-    margin-bottom: 0;
-}
-
-Screen.compact #body {
-    margin-top: 0;
 }
 
 Screen.compact #task-pane {
@@ -175,7 +177,7 @@ Screen.too-small #too-small {
 }
 
 Screen.too-small #body,
-Screen.too-small #view-switch,
+Screen.too-small #day-bar,
 Screen.too-small #status {
     display: none;
 }

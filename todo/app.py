@@ -1,7 +1,7 @@
 import argparse
 import sqlite3
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
 
@@ -91,6 +91,26 @@ def section_row(section: Section, total: Fraction) -> Table:
     return table
 
 
+def schedule_status(intervals: tuple[Interval, ...], now: datetime) -> str:
+    if not intervals:
+        return "No schedule"
+    if now < min(interval.start for interval in intervals):
+        return "Not started"
+    if now >= max(interval.end for interval in intervals):
+        return "Schedule ended"
+    if any(interval.start <= now < interval.end for interval in intervals):
+        return "In progress"
+    return "Between intervals"
+
+
+def load_or_create_day(store: Store, list_date: date) -> Day:
+    day = store.load(list_date)
+    if day is None:
+        day = empty_day(list_date)
+        store.save(day)
+    return day
+
+
 class TaskList(OptionList):
     BINDINGS = [
         Binding("j", "cursor_down", "Down", show=False),
@@ -98,6 +118,55 @@ class TaskList(OptionList):
         Binding("g", "first", "First", show=False),
         Binding("G", "last", "Last", show=False),
     ]
+
+
+class DayPicker(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Cancel"), ("ctrl+enter", "open", "Open")]
+
+    def __init__(self, list_date: date):
+        super().__init__()
+        self.initial_date = list_date
+
+    def compose(self) -> ComposeResult:
+        with Container(classes="dialog", id="day-dialog"):
+            yield Label("Open a day's list", classes="dialog-title")
+            yield Label("Date (YYYY-MM-DD)", classes="field-label")
+            yield Input(
+                self.initial_date.isoformat(), id="list-date", select_on_focus=True
+            )
+            yield Static(
+                "A new date starts an empty list. Undo resets when you switch days.",
+                classes="muted",
+            )
+            yield Static("", id="error", markup=False)
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
+                yield Button(
+                    "Open (Ctrl+Enter)",
+                    id="open",
+                    variant="primary",
+                    action="screen.open",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    @on(Input.Submitted)
+    def action_open(self) -> None:
+        value = self.query_one("#list-date", Input).value.strip()
+        try:
+            list_date = date.fromisoformat(value)
+            if value != list_date.isoformat():
+                raise ValueError
+        except ValueError:
+            self.query_one("#error", Static).update("Use a date in YYYY-MM-DD format.")
+            return
+        try:
+            self.app.switch_day(list_date)
+        except (ValueError, sqlite3.Error, OSError) as error:
+            self.query_one("#error", Static).update(str(error))
+            return
+        self.dismiss()
 
 
 class PointsEditor(ModalScreen):
@@ -247,7 +316,9 @@ class DeleteTask(ModalScreen):
         with Container(classes="dialog", id="delete-dialog"):
             yield Label("Delete task?", classes="dialog-title")
             yield Static(self.task_to_delete.title, markup=False)
-            yield Static("You can undo this until you quit.", classes="muted")
+            yield Static(
+                "You can undo this until you switch days or quit.", classes="muted"
+            )
             yield Static("", id="error", markup=False)
             with Horizontal(classes="dialog-buttons"):
                 yield Button("Cancel", id="cancel")
@@ -389,6 +460,10 @@ class TodoApp(App):
         Binding("K", "move(-1)", "Move up", show=False),
         Binding("h,left", "tasks", "Tasks", show=False),
         Binding("l,right", "details", "Details", show=False),
+        Binding("ctrl+d", "choose_day", "Choose day", show=False),
+        Binding("[", "shift_day(-1)", "Previous day", show=False),
+        Binding("]", "shift_day(1)", "Next day", show=False),
+        Binding("t", "today", "Today", show=False),
         Binding("q", "quit", "Quit"),
         Binding("ctrl+q", "quit", "Quit", show=False),
     ]
@@ -400,9 +475,38 @@ class TodoApp(App):
         self.history: list[Day] = []
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="view-switch"):
-            yield Static("Tasks", id="view-title")
-            yield Button("Analytics →", id="toggle-view", compact=True)
+        with Horizontal(id="day-bar"):
+            yield Button(
+                "‹",
+                id="previous-day",
+                compact=True,
+                tooltip="Previous day ([)",
+                action="app.shift_day(-1)",
+            )
+            yield Button(
+                "",
+                id="choose-day",
+                compact=True,
+                tooltip="Choose day (Ctrl+D)",
+                action="app.choose_day",
+            )
+            yield Button(
+                "›",
+                id="next-day",
+                compact=True,
+                tooltip="Next day (])",
+                action="app.shift_day(1)",
+            )
+            yield Button(
+                "Today",
+                id="today",
+                compact=True,
+                tooltip="Today (t)",
+                action="app.today",
+            )
+            yield Button(
+                "Analytics →", id="toggle-view", compact=True, action="app.toggle_view"
+            )
         with Horizontal(id="body"):
             with Vertical(id="task-pane"):
                 yield Static(
@@ -417,7 +521,12 @@ class TodoApp(App):
                 yield Static("", id="difference", markup=False)
                 yield Static("", id="pace", markup=False)
                 yield Static("", id="details", markup=False)
-                yield Button("Edit schedule", id="edit-schedule", compact=True)
+                yield Button(
+                    "Edit schedule",
+                    id="edit-schedule",
+                    compact=True,
+                    action="app.schedule",
+                )
                 yield Static("", id="schedule", markup=False)
                 yield Static("", id="estimates", markup=False)
         yield Static(
@@ -452,17 +561,49 @@ class TodoApp(App):
 
     def show_analytics(self, show: bool) -> None:
         self.default_screen.set_class(show, "analytics")
-        self.query_one("#view-title", Static).update("Analytics" if show else "Tasks")
         self.query_one("#toggle-view", Button).label = (
             "← Tasks" if show else "Analytics →"
         )
 
-    @on(Button.Pressed, "#toggle-view")
-    def toggle_view(self) -> None:
+    def action_toggle_view(self) -> None:
         if self.default_screen.has_class("analytics"):
             self.action_tasks()
         else:
             self.action_details()
+
+    def action_choose_day(self) -> None:
+        self.push_screen(DayPicker(self.day.date))
+
+    def action_shift_day(self, offset: int) -> None:
+        try:
+            target = self.day.date + timedelta(days=offset)
+        except OverflowError:
+            return
+        self.navigate_day(target)
+
+    def action_today(self) -> None:
+        self.navigate_day(date.today())
+
+    def navigate_day(self, target: date) -> None:
+        try:
+            self.switch_day(target)
+        except (ValueError, sqlite3.Error, OSError) as error:
+            self.notify(
+                str(error), title="Could not open list", severity="error", timeout=8
+            )
+
+    def switch_day(self, list_date: date) -> None:
+        if list_date == self.day.date:
+            return
+        day = load_or_create_day(self.store, list_date)
+        self.day = day
+        self.history.clear()
+        self.query_one("#tasks", TaskList).highlighted = None
+        self.redraw()
+        self.action_tasks()
+        self.query_one("#status", Static).update(
+            "List opened. Undo starts fresh for this day."
+        )
 
     def selected(self) -> tuple[Section, Task] | None:
         option = self.query_one("#tasks", TaskList).highlighted_option
@@ -517,6 +658,12 @@ class TodoApp(App):
     def refresh_clock(self) -> None:
         now = datetime.now()
         day = self.day
+        self.query_one(
+            "#choose-day", Button
+        ).label = f"{day.date:%a} {day.date.isoformat()} ▾"
+        self.query_one("#previous-day", Button).disabled = day.date == date.min
+        self.query_one("#next-day", Button).disabled = day.date == date.max
+        self.query_one("#today", Button).disabled = day.date == now.date()
         earned, available = score(t for _, t in day.tasks())
         elapsed, total = time_progress(day.intervals, now)
         progress = ratio(earned, available)
@@ -531,14 +678,14 @@ class TodoApp(App):
                 "Points", f"{number(earned)} / {number(available)}", progress, "green"
             )
         )
-        self.query_one("#time", Static).update(
-            progress_text(
-                "Scheduled time",
-                f"{duration(elapsed)} / {duration(total)}",
-                time_ratio,
-                "cyan",
-            )
+        text = progress_text(
+            "Scheduled time",
+            f"{duration(elapsed)} / {duration(total)}",
+            time_ratio,
+            "cyan",
         )
+        text.append("\n" + schedule_status(day.intervals, now), style="default")
+        self.query_one("#time", Static).update(text)
         text = Text("Score − time  ")
         text.append(
             percentage(difference, signed=True)
@@ -550,10 +697,13 @@ class TodoApp(App):
         text.append(
             f"Time / point      {per_point(total, available)}\n", style="default"
         )
-        text.append(
-            f"Remaining / point {per_point(total - elapsed, available - earned)}",
-            style="default",
-        )
+        if not total:
+            remaining = "n/a"
+        elif elapsed == total:
+            remaining = "Ended"
+        else:
+            remaining = per_point(total - elapsed, available - earned)
+        text.append(f"Remaining / point {remaining}", style="default")
         text.append("\nminutes:seconds", style="dim")
         self.query_one("#pace", Static).update(text)
         text = Text()
@@ -645,7 +795,6 @@ class TodoApp(App):
         if selected := self.selected():
             self.push_screen(TaskEditor(self.day, selected[1], selected[0].id))
 
-    @on(Button.Pressed, "#edit-schedule")
     def action_schedule(self) -> None:
         self.push_screen(ScheduleEditor(self.day))
 
@@ -740,10 +889,7 @@ def main() -> None:
             store.save(imported)
             day = imported
         else:
-            day = store.load(args.date)
-            if day is None:
-                day = empty_day(args.date)
-                store.save(day)
+            day = load_or_create_day(store, args.date)
     except (ValueError, sqlite3.Error, OSError) as error:
         parser.exit(2, f"todo: {error}\n")
     TodoApp(store, day).run()
