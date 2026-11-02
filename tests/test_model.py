@@ -32,18 +32,35 @@ def test_minutes_parser_accepts_blank_or_positive_whole_minutes():
 
 @pytest.mark.parametrize("text", ["bad", "1.5", "0", "-1"])
 def test_minutes_parser_rejects_invalid_estimates(text):
-    with pytest.raises(ValueError, match="positive whole number"):
+    with pytest.raises(ValueError, match=r"^Use a positive whole number of minutes\.$"):
         parse_minutes(text)
+
+
+@pytest.mark.parametrize("minutes", [0, -1])
+def test_tasks_reject_nonpositive_estimates(minutes):
+    with pytest.raises(ValueError, match=r"^Use a positive whole number of minutes\.$"):
+        Task("Practice", None, minutes=minutes)
 
 
 def test_estimates_stop_at_the_largest_stored_integer():
     largest = 2**63 - 1
     assert parse_minutes(str(largest)) == largest
     assert Task("Practice", None, minutes=largest).minutes == largest
-    with pytest.raises(ValueError, match="positive whole number"):
+    with pytest.raises(ValueError, match=r"^Estimate too large\.$"):
         parse_minutes(str(largest + 1))
-    with pytest.raises(ValueError, match="positive whole number"):
+    with pytest.raises(ValueError, match=r"^Estimate too large\.$"):
         Task("Practice", None, minutes=largest + 1)
+
+
+def test_estimates_exceeding_the_integer_conversion_limit_are_too_large():
+    with pytest.raises(ValueError, match=r"^Estimate too large\.$"):
+        parse_minutes("9" * 5000)
+
+
+def test_new_days_have_no_schedule():
+    day = empty_day(DAY)
+    assert day.intervals == ()
+    assert time_progress(day.intervals, datetime(2026, 11, 1, 12)) == (0, 0)
 
 
 def test_rename_section_preserves_other_day_data_and_allows_duplicate_titles():
@@ -105,14 +122,17 @@ def test_invalid_task_scores_are_rejected_instead_of_disappearing_from_total():
 
 
 def test_schedule_pauses_between_intervals_and_stops_at_end():
-    day = empty_day(DAY)
+    intervals = (
+        parse_interval(DAY, "07:30", "11:00"),
+        parse_interval(DAY, "16:00", "23:00"),
+    )
     for hour in (11, 12, 16):
-        assert time_progress(day.intervals, datetime(2026, 11, 1, hour)) == (
+        assert time_progress(intervals, datetime(2026, 11, 1, hour)) == (
             12600,
             37800,
         )
-    assert time_progress(day.intervals, datetime(2026, 11, 2)) == (37800, 37800)
-    assert time_progress(day.intervals, datetime(2026, 11, 1, 6)) == (0, 37800)
+    assert time_progress(intervals, datetime(2026, 11, 2)) == (37800, 37800)
+    assert time_progress(intervals, datetime(2026, 11, 1, 6)) == (0, 37800)
 
 
 def test_overnight_schedule_belongs_to_its_original_day():

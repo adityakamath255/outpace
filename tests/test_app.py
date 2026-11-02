@@ -14,6 +14,11 @@ from todo.app import TodoApp, main, schedule_status, section_row
 from todo.db import Store
 from todo.model import Interval, Section, Task, empty_day, points
 
+SCHEDULE = (
+    Interval(datetime(2026, 11, 1, 7, 30), datetime(2026, 11, 1, 11)),
+    Interval(datetime(2026, 11, 1, 16), datetime(2026, 11, 1, 23)),
+)
+
 
 def footer_action(app, action):
     return next(key for key in app.query_one(Footer).children if key.action == action)
@@ -59,6 +64,7 @@ def test_startup_does_not_save_an_unedited_day(tmp_path, monkeypatch):
 def app(tmp_path):
     day = replace(
         empty_day(date(2026, 11, 1)),
+        intervals=SCHEDULE,
         sections=(Section("Tasks", (Task("Practice", points("5"), points("2"), 30),)),),
     )
     store = Store(tmp_path / "todo.sqlite3")
@@ -76,6 +82,108 @@ def test_task_dialogs_open(app, key):
     asyncio.run(open_dialog())
 
 
+@pytest.mark.parametrize(
+    "key, field, value", [("e", "#minutes", "35"), ("s", ".interval-end", "10:00")]
+)
+def test_enter_saves_multi_field_forms(app, key, field, value):
+    original = app.day
+
+    async def save_with_enter():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press(key)
+            edited = app.screen.query_one(field, Input)
+            edited.value = value
+            edited.focus()
+            await pilot.press("enter")
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day != original
+            assert app.store.load(original.date) == app.day
+
+    asyncio.run(save_with_enter())
+
+
+def test_enter_selects_a_section_before_saving_from_an_input(app):
+    original = app.day
+
+    async def choose_then_save():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("e")
+            app.screen.query_one(Select).focus()
+            await pilot.press("space", "enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert app.day == original
+            new_section = app.screen.query_one("#new-section", Input)
+            new_section.value = "New group"
+            new_section.focus()
+            await pilot.press("enter")
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day.sections[-1].title == "New group"
+            assert app.day.sections[-1].tasks == original.sections[0].tasks
+            assert app.store.load(original.date) == app.day
+
+    asyncio.run(choose_then_save())
+
+
+@pytest.mark.parametrize("key, field", [("e", "#title"), ("r", "#section-name")])
+def test_enter_on_a_closed_dropdown_saves_the_form(app, key, field):
+    original = app.day
+
+    async def save_from_dropdown():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press(key)
+            app.screen.query_one(field, Input).value = "Changed"
+            app.screen.query_one(Select).focus()
+            await pilot.press("enter")
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day != original
+            assert app.store.load(original.date) == app.day
+
+    asyncio.run(save_from_dropdown())
+
+
+def test_escape_closes_the_dropdown_before_canceling_the_form(app):
+    original = app.day
+
+    async def cancel_in_layers():
+        async with app.run_test() as pilot:
+            await pilot.press("e")
+            app.screen.query_one(Select).focus()
+            await pilot.press("down", "escape")
+            assert isinstance(app.screen, ModalScreen)
+            await pilot.press("escape")
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day == original
+
+    asyncio.run(cancel_in_layers())
+
+
+def test_browsing_days_does_not_show_notifications(app, monkeypatch):
+    messages = []
+    monkeypatch.setattr(
+        app, "notify", lambda message, **kwargs: messages.append(message)
+    )
+
+    async def browse():
+        async with app.run_test() as pilot:
+            await pilot.press("]", "]", "[", "[")
+            assert messages == []
+
+    asyncio.run(browse())
+
+
+def test_today_button_stays_enabled_on_today(app):
+    async def open_today():
+        async with app.run_test() as pilot:
+            await pilot.press("t")
+            today = app.day
+            assert today.date == date.today()
+            assert not app.query_one("#today", Button).disabled
+            assert await pilot.click("#today")
+            assert app.day == today
+
+    asyncio.run(open_today())
+
+
 def test_task_changes_save_and_undo(app):
     async def exercise_tasks():
         async with app.run_test(size=(110, 45)) as pilot:
@@ -84,13 +192,13 @@ def test_task_changes_save_and_undo(app):
             await pilot.press(*"read daily")
             assert app.screen.query_one("#title", Input).value == "read daily"
             await pilot.press("tab")
-            assert app.focused.id == "available"
+            assert app.focused.id == "earned"
             await pilot.press("shift+tab")
             assert app.focused.id == "title"
             app.screen.query_one("#available", Input).value = "2.5"
             app.screen.query_one("#earned", Input).value = "0.5"
             app.screen.query_one("#minutes", Input).value = "20"
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             added = next(
                 task for _, task in app.day.tasks() if task.title == "read daily"
             )
@@ -113,7 +221,7 @@ def test_task_changes_save_and_undo(app):
             assert app.day == before_cancel
             await pilot.press("e")
             app.screen.query_one("#minutes", Input).value = "35"
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             edited = next(task for _, task in app.day.tasks() if task.id == added.id)
             assert edited.minutes == 35
             assert edited.earned == points("2.5")
@@ -203,11 +311,11 @@ def test_oversized_estimate_keeps_form_and_explains_the_limit(app):
             await pilot.press("e")
             field = app.screen.query_one("#minutes", Input)
             field.value = oversized
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             assert isinstance(app.screen, ModalScreen)
             assert field.value == oversized
             error = str(app.screen.query_one("#error", Static).content)
-            assert "positive whole number" in error
+            assert "too large" in error
             assert app.day == original
             assert not app.history
             assert Store(app.store.path).load(original.date) == original
@@ -265,7 +373,7 @@ def test_sections_can_be_renamed_including_empty_duplicate_named_groups(app):
 
     async def rename_sections():
         async with app.run_test(size=(110, 45)) as pilot:
-            await pilot.press("r", *"Work", "ctrl+enter")
+            await pilot.press("r", *"Work", "enter")
             assert app.day.sections[0].title == "Work"
             assert app.day.sections[0].id == original.sections[0].id
             assert app.day.sections[0].tasks == original.sections[0].tasks
@@ -273,8 +381,7 @@ def test_sections_can_be_renamed_including_empty_duplicate_named_groups(app):
             await pilot.press("u")
             assert app.day == original
 
-            assert await pilot.click("#rename-section")
-            await pilot.press("shift+tab", "enter", "end", "enter", "tab")
+            await pilot.press("r", "shift+tab", "space", "end", "enter", "tab")
             assert app.screen.query_one("#section", Select).value == empty.id
             assert app.screen.query_one(Input).value == empty.title
             await pilot.press(*"Later")
@@ -298,7 +405,7 @@ def test_section_rename_rejects_blank_names_and_preserves_failed_drafts(app):
             await pilot.press("r")
             field = app.screen.query_one("#section-name", Input)
             field.value = " "
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             assert isinstance(app.screen, ModalScreen)
             assert app.day == original
             assert str(app.screen.query_one("#error", Static).content)
@@ -306,7 +413,7 @@ def test_section_rename_rejects_blank_names_and_preserves_failed_drafts(app):
 
             field.value = "Keep this draft"
             Store(app.store.path).save(changed, expected=original)
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             assert isinstance(app.screen, ModalScreen)
             assert field.value == "Keep this draft"
             assert "changed" in str(app.screen.query_one("#error", Static).content)
@@ -381,7 +488,7 @@ def test_ended_schedule_is_explained_instead_of_showing_zero_remaining(
     ],
 )
 def test_schedule_status_uses_intervals_instead_of_the_list_date(now, expected):
-    intervals = tuple(reversed(empty_day(date(2026, 11, 1)).intervals))
+    intervals = tuple(reversed(SCHEDULE))
     assert schedule_status(intervals, now) == expected
 
 
@@ -420,13 +527,10 @@ def test_day_switching_preserves_lists_and_creates_new_days(app):
             tomorrow = app.day
             assert tomorrow.date == date(2026, 11, 2)
             assert not list(tomorrow.tasks())
-            assert all(
-                interval.start.date() == tomorrow.date
-                for interval in tomorrow.intervals
-            )
+            assert tomorrow.intervals == ()
             assert app.store.load(tomorrow.date) is None
             await pilot.press("a", *"New task")
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             assert app.store.load(tomorrow.date) == app.day
             assert next(app.day.tasks())[1].title == "New task"
 
@@ -521,7 +625,7 @@ def test_first_edit_saves_and_undo_restores_an_unsaved_day(tmp_path):
             original = app.day
             for title in ("First task", "Try again"):
                 assert app.store.load(original.date) is None
-                await pilot.press("a", *title, "ctrl+enter")
+                await pilot.press("a", *title, "enter")
                 assert app.store.load(original.date) == app.day
                 assert next(app.day.tasks())[1].title == title
                 await pilot.press("u")
@@ -551,7 +655,7 @@ def test_failed_first_edit_preserves_the_draft_and_saved_data(
                     Store(store.path).save(winner)
                 else:
                     patch.setattr(store, "save", fail)
-                await pilot.press("ctrl+enter")
+                await pilot.press("enter")
             assert isinstance(app.screen, ModalScreen)
             assert app.screen.query_one("#title", Input).value == "Keep my draft"
             assert str(app.screen.query_one("#error", Static).content)
@@ -568,7 +672,7 @@ def test_undo_first_edit_cannot_delete_another_sessions_changes(tmp_path):
 
     async def reject_undo():
         async with app.run_test(size=(110, 45)) as pilot:
-            await pilot.press("a", *"First task", "ctrl+enter")
+            await pilot.press("a", *"First task", "enter")
             saved, history = app.day, list(app.history)
             changed = replace(
                 saved, sections=(replace(saved.sections[0], title="Changed elsewhere"),)
@@ -641,7 +745,7 @@ def test_schedule_overlap_preserves_draft_and_cancel_discards_it(app):
             await pilot.press("s")
             end = app.screen.query(".interval-end").first(Input)
             end.value = "18:00"
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             assert isinstance(app.screen, ModalScreen)
             assert end.value == "18:00"
             assert "overlap" in str(app.screen.query_one("#error", Static).content)
@@ -663,7 +767,7 @@ def test_out_of_range_clock_preserves_draft_and_explains_the_format(app):
             await pilot.press("s")
             start = app.screen.query(".interval-start").first(Input)
             start.value = "9:75"
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             assert isinstance(app.screen, ModalScreen)
             assert start.value == "9:75"
             assert "24-hour" in str(app.screen.query_one("#error", Static).content)
@@ -681,7 +785,8 @@ def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):
             for row in list(app.screen.query(".interval-row")):
                 row.query_one(Button).press()
                 await pilot.pause()
-            await pilot.press("ctrl+enter")
+            app.screen.query_one("#save", Button).focus()
+            await pilot.press("enter")
             assert app.day.intervals == ()
             assert "Remaining / point n/a" in str(
                 app.query_one("#pace", Static).content
@@ -693,7 +798,7 @@ def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):
             assert app.focused.has_class("interval-start")
             app.screen.query_one(".interval-start", Input).value = "08:00"
             app.screen.query_one(".interval-end", Input).value = "09:00"
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             assert app.day.intervals == (
                 Interval(datetime(2026, 11, 1, 8), datetime(2026, 11, 1, 9)),
             )
@@ -712,7 +817,7 @@ def test_schedule_save_conflict_preserves_draft_and_other_changes(app):
             start = app.screen.query(".interval-start").first(Input)
             start.value = "08:00"
             Store(app.store.path).save(concurrent, expected=original)
-            await pilot.press("ctrl+enter")
+            await pilot.press("enter")
             assert isinstance(app.screen, ModalScreen)
             assert start.value == "08:00"
             assert "changed" in str(app.screen.query_one("#error", Static).content)

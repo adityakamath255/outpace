@@ -9,9 +9,8 @@ from uuid import uuid4
 
 # sqlite stores integers in at most 64 signed bits
 MAX_MINUTES = 2**63 - 1
-_MINUTES_ERROR = (
-    f"Estimated minutes must be a positive whole number up to {MAX_MINUTES}."
-)
+_MINUTES_ERROR = "Use a positive whole number of minutes."
+_MINUTES_TOO_LARGE = "Estimate too large."
 _CLOCK_ERROR = "Use a 24-hour time in H:MM or HH:MM format."
 
 
@@ -25,16 +24,24 @@ def points(value: str) -> Fraction:
     return Fraction(value.strip())
 
 
+def _check_minutes(minutes: int) -> None:
+    if not minutes > 0:
+        raise ValueError(_MINUTES_ERROR)
+    if minutes > MAX_MINUTES:
+        raise ValueError(_MINUTES_TOO_LARGE)
+
+
 def parse_minutes(value: str) -> int | None:
     value = value.strip()
     if not value:
         return None
+    if not value.isdecimal():
+        raise ValueError(_MINUTES_ERROR)
     try:
         minutes = int(value)
     except ValueError as error:
-        raise ValueError(_MINUTES_ERROR) from error
-    if not value.isdecimal() or not 0 < minutes <= MAX_MINUTES:
-        raise ValueError(_MINUTES_ERROR)
+        raise ValueError(_MINUTES_TOO_LARGE) from error
+    _check_minutes(minutes)
     return minutes
 
 
@@ -60,8 +67,8 @@ class Task:
                 raise ValueError("Scored tasks derive completion from their points.")
         elif self.earned:
             raise ValueError("Unscored tasks cannot have earned points.")
-        if self.minutes is not None and not 0 < self.minutes <= MAX_MINUTES:
-            raise ValueError(_MINUTES_ERROR)
+        if self.minutes is not None:
+            _check_minutes(self.minutes)
 
     @property
     def complete(self) -> bool:
@@ -196,16 +203,7 @@ class Day:
 
 
 def empty_day(day: date) -> Day:
-    return Day(
-        day,
-        (
-            Interval(
-                datetime.combine(day, time(7, 30)), datetime.combine(day, time(11))
-            ),
-            Interval(datetime.combine(day, time(16)), datetime.combine(day, time(23))),
-        ),
-        (Section("Tasks"),),
-    )
+    return Day(day, (), (Section("Tasks"),))
 
 
 def score(tasks: Iterable[Task]) -> tuple[Fraction, Fraction]:

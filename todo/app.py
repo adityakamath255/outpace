@@ -112,6 +112,11 @@ class TaskList(OptionList):
     ]
 
 
+class FormSelect(Select):
+    # the expanded menu handles Enter before this binding is considered
+    BINDINGS = [Binding("enter", "screen.save", "Save", show=False)]
+
+
 class DialogButtons(Horizontal):
     BINDINGS = [
         Binding("left,up,h,k", "move(-1)", "Previous button", show=False),
@@ -126,7 +131,7 @@ class DialogButtons(Horizontal):
 
 
 class DayPicker(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel"), ("ctrl+enter", "open", "Open")]
+    BINDINGS = [("escape", "dismiss", "Cancel")]
 
     def __init__(self, list_date: date):
         super().__init__()
@@ -147,7 +152,7 @@ class DayPicker(ModalScreen):
             with DialogButtons():
                 yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
                 yield Button(
-                    "Open (Ctrl+Enter)",
+                    "Open (Enter)",
                     id="open",
                     variant="primary",
                     action="screen.open",
@@ -175,7 +180,7 @@ class DayPicker(ModalScreen):
 
 
 class PointsEditor(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel"), ("ctrl+enter", "save", "Save")]
+    BINDINGS = [("escape", "dismiss", "Cancel")]
 
     def __init__(self, task: Task, section_id: str):
         super().__init__()
@@ -197,7 +202,7 @@ class PointsEditor(ModalScreen):
             with DialogButtons():
                 yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
                 yield Button(
-                    "Save (Ctrl+Enter)",
+                    "Save (Enter)",
                     id="save",
                     variant="primary",
                     action="screen.save",
@@ -222,7 +227,7 @@ class PointsEditor(ModalScreen):
 
 
 class TaskEditor(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel"), ("ctrl+enter", "save", "Save")]
+    BINDINGS = [("escape", "dismiss", "Cancel")]
 
     def __init__(self, day: Day, task: Task | None, section_id: str):
         super().__init__()
@@ -238,6 +243,9 @@ class TaskEditor(ModalScreen):
             yield Input(task.title if task else "", id="title")
             with Horizontal(classes="fields"):
                 with Vertical():
+                    yield Label("Earned points", classes="field-label")
+                    yield Input(number(task.earned) if task else "0", id="earned")
+                with Vertical():
                     yield Label("Available points", classes="field-label")
                     yield Input(
                         number(task.available)
@@ -246,16 +254,13 @@ class TaskEditor(ModalScreen):
                         placeholder="Blank = unscored",
                         id="available",
                     )
-                with Vertical():
-                    yield Label("Earned points", classes="field-label")
-                    yield Input(number(task.earned) if task else "0", id="earned")
             yield Label("Estimated minutes (optional)", classes="field-label")
             yield Input(
                 str(task.minutes) if task and task.minutes is not None else "",
                 id="minutes",
             )
-            yield Label("Section", classes="field-label")
-            yield Select(
+            yield Label("Section (Space/Down to choose)", classes="field-label")
+            yield FormSelect(
                 [(Text(s.title), s.id) for s in self.day.sections],
                 value=self.section_id,
                 allow_blank=False,
@@ -267,7 +272,7 @@ class TaskEditor(ModalScreen):
             with DialogButtons():
                 yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
                 yield Button(
-                    "Save (Ctrl+Enter)",
+                    "Save (Enter)",
                     id="save",
                     variant="primary",
                     action="screen.save",
@@ -276,6 +281,7 @@ class TaskEditor(ModalScreen):
     def on_mount(self) -> None:
         self.query_one("#title", Input).focus()
 
+    @on(Input.Submitted)
     def action_save(self) -> None:
         try:
             available_text = self.query_one("#available", Input).value.strip()
@@ -308,7 +314,7 @@ class TaskEditor(ModalScreen):
 
 
 class SectionEditor(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel"), ("ctrl+enter", "save", "Save")]
+    BINDINGS = [("escape", "dismiss", "Cancel")]
 
     def __init__(self, day: Day, section_id: str):
         super().__init__()
@@ -319,8 +325,8 @@ class SectionEditor(ModalScreen):
         section = next(s for s in self.edited_day.sections if s.id == self.section_id)
         with VerticalScroll(classes="dialog", id="section-dialog"):
             yield Label("Rename section", classes="dialog-title")
-            yield Label("Section", classes="field-label")
-            yield Select(
+            yield Label("Section (Space/Down to choose)", classes="field-label")
+            yield FormSelect(
                 [
                     (Text(f"{index}. {s.title}"), s.id)
                     for index, s in enumerate(self.edited_day.sections, 1)
@@ -335,7 +341,7 @@ class SectionEditor(ModalScreen):
             with DialogButtons():
                 yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
                 yield Button(
-                    "Save (Ctrl+Enter)",
+                    "Save (Enter)",
                     id="save",
                     variant="primary",
                     action="screen.save",
@@ -443,7 +449,6 @@ class IntervalRow(Horizontal):
 class ScheduleEditor(ModalScreen):
     BINDINGS = [
         ("escape", "dismiss", "Cancel"),
-        ("ctrl+enter", "save", "Save"),
         ("ctrl+n", "add_interval", "Add interval"),
     ]
 
@@ -468,7 +473,7 @@ class ScheduleEditor(ModalScreen):
             with DialogButtons():
                 yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
                 yield Button(
-                    "Save (Ctrl+Enter)",
+                    "Save (Enter)",
                     id="save",
                     variant="primary",
                     action="screen.save",
@@ -490,6 +495,7 @@ class ScheduleEditor(ModalScreen):
         await self.query_one("#interval-rows", Vertical).mount(row)
         row.query_one(".interval-start", Input).focus()
 
+    @on(Input.Submitted)
     def action_save(self) -> None:
         try:
             intervals = tuple(
@@ -544,7 +550,7 @@ class TodoApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="day-bar"):
             yield Button(
-                "‹",
+                Text("[ Prev"),
                 id="previous-day",
                 compact=True,
                 tooltip="Previous day ([)",
@@ -558,7 +564,7 @@ class TodoApp(App):
                 action="app.choose_day",
             )
             yield Button(
-                "›",
+                Text("Next ]"),
                 id="next-day",
                 compact=True,
                 tooltip="Next day (])",
@@ -588,13 +594,6 @@ class TodoApp(App):
                 yield Static("", id="difference", markup=False)
                 yield Static("", id="pace", markup=False)
                 yield Static("", id="details", markup=False)
-                yield Button(
-                    "Rename section (r)",
-                    id="rename-section",
-                    compact=True,
-                    action="app.rename_section",
-                    classes="pane-action",
-                )
                 yield Button(
                     "Edit schedule",
                     id="edit-schedule",
@@ -675,7 +674,6 @@ class TodoApp(App):
         self.query_one("#tasks", TaskList).highlighted = None
         self.redraw()
         self.action_tasks()
-        self.notify("Undo starts fresh for this day.", timeout=2)
 
     def selected(self) -> tuple[Section, Task] | None:
         option = self.query_one("#tasks", TaskList).highlighted_option
@@ -737,7 +735,6 @@ class TodoApp(App):
         ).label = f"{day.date:%a} {day.date.isoformat()} ▾"
         self.query_one("#previous-day", Button).disabled = day.date == date.min
         self.query_one("#next-day", Button).disabled = day.date == date.max
-        self.query_one("#today", Button).disabled = day.date == now.date()
         earned, available = score(t for _, t in day.tasks())
         elapsed, total = time_progress(day.intervals, now)
         progress = ratio(earned, available)

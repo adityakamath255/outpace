@@ -26,6 +26,17 @@ Screen {
     text-style: reverse;
 }
 
+#day-bar #today {
+    background: ansi_blue;
+    color: ansi_bright_white;
+    text-style: bold;
+}
+
+#day-bar #today:hover,
+#day-bar #today:focus {
+    text-style: bold reverse;
+}
+
 #day-bar #toggle-view {
     display: none;
 }
