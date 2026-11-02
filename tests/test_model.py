@@ -36,6 +36,16 @@ def test_minutes_parser_rejects_invalid_estimates(text):
         parse_minutes(text)
 
 
+def test_estimates_stop_at_the_largest_stored_integer():
+    largest = 2**63 - 1
+    assert parse_minutes(str(largest)) == largest
+    assert Task("Practice", None, minutes=largest).minutes == largest
+    with pytest.raises(ValueError, match="positive whole number"):
+        parse_minutes(str(largest + 1))
+    with pytest.raises(ValueError, match="positive whole number"):
+        Task("Practice", None, minutes=largest + 1)
+
+
 def test_rename_section_preserves_other_day_data_and_allows_duplicate_titles():
     first = Section("One", (Task("Practice", points("2"), points("1")),))
     second = Section("Two", (Task("Note", None, checked=True),))
@@ -138,6 +148,15 @@ def test_interval_parser_anchors_overnight_intervals(next_day):
 )
 def test_interval_parser_rejects_invalid_clocks_and_equal_endpoints(start, end):
     with pytest.raises(ValueError):
+        parse_interval(DAY, start, end)
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [("24:00", "01:00"), ("9:75", "10:00"), ("07:30", "25:00")],
+)
+def test_interval_parser_explains_out_of_range_clocks(start, end):
+    with pytest.raises(ValueError, match="24-hour time"):
         parse_interval(DAY, start, end)
 
 

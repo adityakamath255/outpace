@@ -26,6 +26,14 @@ def test_save_reopen_edit_and_restore_snapshot(tmp_path):
     assert store.load(DAY) == original
 
 
+def test_largest_allowed_estimate_round_trips(tmp_path):
+    store = Store(tmp_path / "todo.sqlite3")
+    task = Task("Practice", None, minutes=2**63 - 1)
+    day = replace(empty_day(DAY), sections=(Section("Tasks", (task,)),))
+    store.save(day)
+    assert store.load(DAY) == day
+
+
 def test_failed_write_rolls_back_without_touching_other_days(tmp_path):
     store = Store(tmp_path / "todo.sqlite3")
     original = replace(

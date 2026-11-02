@@ -728,6 +728,8 @@ class TodoApp(App):
         self.refresh_details()
 
     def refresh_clock(self) -> None:
+        if not self.is_running:
+            return
         now = datetime.now()
         day = self.day
         self.query_one(

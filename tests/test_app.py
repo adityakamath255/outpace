@@ -36,6 +36,15 @@ def test_app_starts(tmp_path):
     asyncio.run(start())
 
 
+def test_clock_callback_does_not_touch_widgets_after_shutdown(app):
+    async def stop_then_tick():
+        async with app.run_test():
+            assert app.is_running
+        app.refresh_clock()
+
+    asyncio.run(stop_then_tick())
+
+
 def test_startup_does_not_save_an_unedited_day(tmp_path, monkeypatch):
     path = tmp_path / "todo.sqlite3"
     monkeypatch.setattr(
@@ -183,6 +192,27 @@ def test_failed_save_keeps_form_and_does_not_change_history(app):
             assert Store(app.store.path).load(original.date) == concurrent
 
     asyncio.run(fail_save())
+
+
+def test_oversized_estimate_keeps_form_and_explains_the_limit(app):
+    original = app.day
+    oversized = str(2**63)
+
+    async def reject_estimate():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("e")
+            field = app.screen.query_one("#minutes", Input)
+            field.value = oversized
+            await pilot.press("ctrl+enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert field.value == oversized
+            error = str(app.screen.query_one("#error", Static).content)
+            assert "positive whole number" in error
+            assert app.day == original
+            assert not app.history
+            assert Store(app.store.path).load(original.date) == original
+
+    asyncio.run(reject_estimate())
 
 
 def test_saving_points_keeps_navigation_hints_visible(app):
@@ -623,6 +653,25 @@ def test_schedule_overlap_preserves_draft_and_cancel_discards_it(app):
             assert app.day == original
 
     asyncio.run(reject_overlap())
+
+
+def test_out_of_range_clock_preserves_draft_and_explains_the_format(app):
+    original = app.day
+
+    async def reject_clock():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("s")
+            start = app.screen.query(".interval-start").first(Input)
+            start.value = "9:75"
+            await pilot.press("ctrl+enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert start.value == "9:75"
+            assert "24-hour" in str(app.screen.query_one("#error", Static).content)
+            assert app.day == original
+            assert not app.history
+            assert Store(app.store.path).load(original.date) == original
+
+    asyncio.run(reject_clock())
 
 
 def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):

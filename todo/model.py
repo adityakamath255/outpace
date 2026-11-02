@@ -7,7 +7,12 @@ from fractions import Fraction
 from itertools import pairwise
 from uuid import uuid4
 
-_MINUTES_ERROR = "Estimated minutes must be a positive whole number."
+# sqlite stores integers in at most 64 signed bits
+MAX_MINUTES = 2**63 - 1
+_MINUTES_ERROR = (
+    f"Estimated minutes must be a positive whole number up to {MAX_MINUTES}."
+)
+_CLOCK_ERROR = "Use a 24-hour time in H:MM or HH:MM format."
 
 
 def identifier() -> str:
@@ -28,7 +33,7 @@ def parse_minutes(value: str) -> int | None:
         minutes = int(value)
     except ValueError as error:
         raise ValueError(_MINUTES_ERROR) from error
-    if not value.isdecimal() or minutes <= 0:
+    if not value.isdecimal() or not 0 < minutes <= MAX_MINUTES:
         raise ValueError(_MINUTES_ERROR)
     return minutes
 
@@ -55,7 +60,7 @@ class Task:
                 raise ValueError("Scored tasks derive completion from their points.")
         elif self.earned:
             raise ValueError("Unscored tasks cannot have earned points.")
-        if self.minutes is not None and self.minutes <= 0:
+        if self.minutes is not None and not 0 < self.minutes <= MAX_MINUTES:
             raise ValueError(_MINUTES_ERROR)
 
     @property
@@ -94,8 +99,11 @@ def parse_interval(
 ) -> Interval:
     clocks = (start.strip(), end.strip())
     if any(re.fullmatch(r"\d{1,2}:\d{2}", clock) is None for clock in clocks):
-        raise ValueError("Use a 24-hour time in H:MM or HH:MM format.")
-    start_clock, end_clock = (time.strptime(clock, "%H:%M") for clock in clocks)
+        raise ValueError(_CLOCK_ERROR)
+    try:
+        start_clock, end_clock = (time.strptime(clock, "%H:%M") for clock in clocks)
+    except ValueError as error:
+        raise ValueError(_CLOCK_ERROR) from error
     if start_clock == end_clock:
         raise ValueError("An interval cannot have identical start and end times.")
     try:
