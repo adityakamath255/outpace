@@ -281,6 +281,96 @@ def test_panes_keep_selection_and_edits_work_after_resize(app):
     asyncio.run(switch_panes())
 
 
+@pytest.mark.parametrize("size", [(76, 36), (52, 10)])
+def test_layout_keeps_day_controls_and_content_available(app, size):
+    async def use_layout():
+        async with app.run_test(size=size) as pilot:
+            assert app.query_one("#body").display
+            assert app.query_one("#task-pane").display
+            if size[0] == 76:
+                assert app.query_one("#sidebar").display
+            for selector in ("#choose-day", "#previous-day", "#next-day", "#today"):
+                button = app.query_one(selector, Button)
+                assert button.region.right <= size[0]
+                assert button.content_size.width >= button.label.cell_length
+            await pilot.press("l")
+            assert app.focused.id == "sidebar"
+            assert app.query_one("#sidebar").display
+            await pilot.press("h", "e")
+            assert isinstance(app.screen, ModalScreen)
+
+    asyncio.run(use_layout())
+
+
+def test_analytics_scrolls_with_vim_keys_without_changing_task_selection(app):
+    async def scroll_analytics():
+        async with app.run_test(size=(76, 18)) as pilot:
+            selected = app.selected()
+            await pilot.press("l", "j")
+            await pilot.pause()
+            sidebar = app.query_one("#sidebar")
+            assert sidebar.scroll_y > 0
+            await pilot.press("k")
+            await pilot.pause()
+            assert sidebar.scroll_y == 0
+            await pilot.press("h")
+            assert app.selected() == selected
+
+    asyncio.run(scroll_analytics())
+
+
+def test_pane_hints_keep_shared_shortcuts_and_only_change_local_controls(app):
+    async def check_hints():
+        async with app.run_test() as pilot:
+            status = app.query_one("#status", Static)
+            task_hints = str(status.content).split(" · ")
+            assert "j/k select" in task_hints
+            assert "Enter points" in task_hints
+            await pilot.press("l")
+            analytics_hints = str(status.content).split(" · ")
+            assert "j/k scroll" in analytics_hints
+            assert "s schedule" not in analytics_hints
+            for shared in ("h/l panes", "r section", "J/K move"):
+                assert shared in task_hints and shared in analytics_hints
+            assert task_hints.index("h/l panes") == analytics_hints.index("h/l panes")
+            app.query_one("#edit-schedule", Button).focus()
+            await pilot.pause()
+            assert str(status.content).split(" · ") == analytics_hints
+            app.query_one("#choose-day", Button).focus()
+            await pilot.pause()
+            assert "j/k" not in str(status.content)
+            assert "Enter points" not in str(status.content)
+
+    asyncio.run(check_hints())
+
+
+def test_enter_hint_matches_unscored_task_completion(app):
+    async def complete_unscored_task():
+        async with app.run_test() as pilot:
+            await pilot.press("a", *"Remember", "enter")
+            assert "Enter done" in str(app.query_one("#status", Static).content)
+            await pilot.press("enter")
+            assert app.selected()[1].checked
+            assert not isinstance(app.screen, ModalScreen)
+
+    asyncio.run(complete_unscored_task())
+
+
+def test_total_estimate_uses_hours_and_minutes(app):
+    section, _ = next(app.day.tasks())
+
+    async def read_estimate():
+        async with app.run_test():
+            app.save_change(
+                app.day.put_task(Task("Read", None, minutes=190), section.id)
+            )
+            assert "3:40 across 2 tasks" in str(
+                app.query_one("#estimates", Static).content
+            )
+
+    asyncio.run(read_estimate())
+
+
 def test_failed_save_keeps_form_and_does_not_change_history(app):
     original = app.day
     section, task = next(original.tasks())

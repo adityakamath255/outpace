@@ -76,18 +76,18 @@ Screen {
 }
 
 #tasks > .option-list--option-highlighted {
-    background: ansi_default;
-    color: ansi_default;
-    text-style: reverse;
+    background: ansi_blue;
+    color: ansi_bright_white;
+    text-style: none;
 }
 
 #tasks:focus > .option-list--option-highlighted {
-    text-style: bold reverse;
+    text-style: bold;
 }
 
 #tasks > .option-list--option-hover {
-    background: ansi_default;
-    text-style: underline;
+    background: ansi_bright_black;
+    text-style: none;
 }
 
 #tasks > .option-list--option-disabled {
@@ -178,20 +178,21 @@ Screen.compact.analytics #sidebar {
     border-left: none;
 }
 
-#too-small {
-    display: none;
-    height: 1fr;
-    content-align: center middle;
+Screen.narrow #day-bar {
+    layout: grid;
+    grid-size: 4;
+    grid-columns: 1fr 1fr 1fr 2fr;
+    grid-rows: 1 1;
+    height: 2;
 }
 
-Screen.too-small #too-small {
-    display: block;
+Screen.narrow #day-bar #choose-day {
+    column-span: 4;
+    width: 100%;
 }
 
-Screen.too-small #body,
-Screen.too-small #day-bar,
-Screen.too-small #status {
-    display: none;
+Screen.narrow #day-bar Button {
+    width: 100%;
 }
 
 ModalScreen {

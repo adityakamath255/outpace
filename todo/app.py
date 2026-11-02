@@ -112,6 +112,13 @@ class TaskList(OptionList):
     ]
 
 
+class AnalyticsPane(VerticalScroll):
+    BINDINGS = [
+        Binding("j", "scroll_down", "Scroll down", show=False),
+        Binding("k", "scroll_up", "Scroll up", show=False),
+    ]
+
+
 class FormSelect(Select):
     # the expanded menu handles Enter before this binding is considered
     BINDINGS = [Binding("enter", "screen.save", "Save", show=False)]
@@ -458,7 +465,7 @@ class ScheduleEditor(ModalScreen):
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(classes="dialog", id="schedule-dialog"):
-            yield Label("Edit schedule", classes="dialog-title")
+            yield Label("Schedule", classes="dialog-title")
             yield Static(
                 "Use 24-hour times. An end before its start means overnight. "
                 "Tick Starts next day for an interval beginning after midnight. "
@@ -550,13 +557,6 @@ class TodoApp(App):
     def compose(self) -> ComposeResult:
         with Horizontal(id="day-bar"):
             yield Button(
-                Text("[ Prev"),
-                id="previous-day",
-                compact=True,
-                tooltip="Previous day ([)",
-                action="app.shift_day(-1)",
-            )
-            yield Button(
                 "",
                 id="choose-day",
                 compact=True,
@@ -564,7 +564,14 @@ class TodoApp(App):
                 action="app.choose_day",
             )
             yield Button(
-                Text("Next ]"),
+                Text("[ Prev"),
+                id="previous-day",
+                compact=True,
+                tooltip="Previous day ([)",
+                action="app.shift_day(-1)",
+            )
+            yield Button(
+                Text("] Next"),
                 id="next-day",
                 compact=True,
                 tooltip="Next day (])",
@@ -587,15 +594,15 @@ class TodoApp(App):
                     id="columns",
                 )
                 yield TaskList(id="tasks")
-                yield Static("Add your first task with a or Add below.", id="empty")
-            with VerticalScroll(id="sidebar"):
+                yield Static("Press a to add your first task.", id="empty")
+            with AnalyticsPane(id="sidebar"):
                 yield Static("", id="score", markup=False)
                 yield Static("", id="time", markup=False)
                 yield Static("", id="difference", markup=False)
                 yield Static("", id="pace", markup=False)
                 yield Static("", id="details", markup=False)
                 yield Button(
-                    "Edit schedule",
+                    "Schedule",
                     id="edit-schedule",
                     compact=True,
                     action="app.schedule",
@@ -603,10 +610,6 @@ class TodoApp(App):
                 )
                 yield Static("", id="schedule", markup=False)
                 yield Static("", id="estimates", markup=False)
-        yield Static(
-            "The list needs 60 columns and 12 rows.\nResize the terminal, or q to quit.",
-            id="too-small",
-        )
         yield Static("", id="status", markup=False)
         yield Footer(compact=True)
 
@@ -615,23 +618,35 @@ class TodoApp(App):
         self.redraw()
         self.set_interval(1, self.refresh_clock)
         self.query_one("#tasks", TaskList).focus()
-        self.query_one("#status", Static).update(
-            "Enter points · r section · J/K move · h/l panes"
-        )
 
     def on_resize(self, event: events.Resize) -> None:
-        self.default_screen.set_class(event.size.width < 80, "compact")
-        self.default_screen.set_class(
-            event.size.width < 60 or event.size.height < 12, "too-small"
-        )
+        self.default_screen.set_class(event.size.width < 72, "compact")
+        self.default_screen.set_class(event.size.width < 60, "narrow")
 
-    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
-        if isinstance(event.widget, TaskList):
+    def on_descendant_focus(self) -> None:
+        self.refresh_navigation()
+
+    def refresh_navigation(self) -> None:
+        focused = self.focused
+        ancestors = (focused, *focused.ancestors) if focused is not None else ()
+        pane = next(
+            (w for w in ancestors if isinstance(w, (TaskList, AnalyticsPane))), None
+        )
+        hints = ["h/l panes"]
+        if isinstance(pane, TaskList):
             self.show_analytics(False)
-        elif event.widget.id == "sidebar" or any(
-            ancestor.id == "sidebar" for ancestor in event.widget.ancestors
-        ):
+            hints.append("j/k select")
+            if selected := self.selected():
+                hints.append(
+                    "Enter points"
+                    if selected[1].available is not None
+                    else "Enter done"
+                )
+        elif isinstance(pane, AnalyticsPane):
             self.show_analytics(True)
+            hints.append("j/k scroll")
+        hints.extend(("r section", "J/K move"))
+        self.query_one("#status", Static).update(" · ".join(hints))
 
     def show_analytics(self, show: bool) -> None:
         self.default_screen.set_class(show, "analytics")
@@ -822,14 +837,16 @@ class TodoApp(App):
         self.query_one("#details", Static).update(text)
         tasks = [task for _, task in self.day.tasks()]
         estimates = [task.minutes for task in tasks if task.minutes is not None]
-        text = Text("Estimates\n", style="bold cyan")
+        text = Text("Estimates (h:mm)\n", style="bold cyan")
+        hours, minutes = divmod(sum(estimates), 60)
         text.append(
-            f"{sum(estimates)}m across {len(estimates)} tasks\n", style="default"
+            f"{hours}:{minutes:02d} across {len(estimates)} tasks\n", style="default"
         )
         missing = len(tasks) - len(estimates)
         if missing:
             text.append(f"{missing} without an estimate", style="dim")
         self.query_one("#estimates", Static).update(text)
+        self.refresh_navigation()
 
     @on(OptionList.OptionHighlighted, "#tasks")
     def highlighted(self) -> None:
