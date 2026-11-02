@@ -13,6 +13,7 @@ from todo.model import (
     empty_day,
     import_markdown,
     number,
+    parse_interval,
     per_point,
     percentage,
     points,
@@ -79,6 +80,53 @@ def test_overnight_schedule_belongs_to_its_original_day():
     assert time_progress((interval,), datetime(2026, 11, 2, 0, 30)) == (5400, 7200)
     with pytest.raises(ValueError, match="overlap"):
         Day(DAY, (interval, interval), (Section("Tasks"),))
+
+
+def test_interval_parser_accepts_clock_formats_and_outer_whitespace():
+    assert parse_interval(DAY, " 7:30 ", "11:00") == Interval(
+        datetime(2026, 11, 1, 7, 30), datetime(2026, 11, 1, 11)
+    )
+
+
+@pytest.mark.parametrize("next_day", [False, True])
+def test_interval_parser_anchors_overnight_intervals(next_day):
+    assert parse_interval(DAY, "23:00", "01:00", next_day=next_day) == Interval(
+        datetime(2026, 11, 1 + next_day, 23),
+        datetime(2026, 11, 2 + next_day, 1),
+    )
+
+
+@pytest.mark.parametrize(
+    ("start", "end"),
+    [
+        ("7:3", "08:00"),
+        ("07:30", "bad"),
+        ("24:00", "01:00"),
+        ("07:60", "09:00"),
+        ("07:30", "7:30"),
+    ],
+)
+def test_interval_parser_rejects_invalid_clocks_and_equal_endpoints(start, end):
+    with pytest.raises(ValueError):
+        parse_interval(DAY, start, end)
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "next_day"),
+    [("23:00", "01:00", False), ("07:30", "11:00", True)],
+)
+def test_interval_parser_reports_unrepresentable_dates(start, end, next_day):
+    with pytest.raises(ValueError, match="date range"):
+        parse_interval(date.max, start, end, next_day=next_day)
+
+
+def test_day_accepts_touching_intervals_and_rejects_partial_overlap():
+    first = parse_interval(DAY, "07:30", "11:00")
+    touching = parse_interval(DAY, "11:00", "12:00")
+    day = Day(DAY, (touching, first), (Section("Tasks"),))
+    assert time_progress(day.intervals, datetime(2026, 11, 1, 12)) == (16200, 16200)
+    with pytest.raises(ValueError, match="overlap"):
+        replace(day, intervals=(first, parse_interval(DAY, "10:59", "12:00")))
 
 
 def test_report_matches_the_original_calculations():

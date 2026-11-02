@@ -74,6 +74,28 @@ class Interval:
         return int((self.end - self.start).total_seconds())
 
 
+def parse_interval(
+    day: date, start: str, end: str, *, next_day: bool = False
+) -> Interval:
+    clocks = (start.strip(), end.strip())
+    if any(re.fullmatch(r"\d{1,2}:\d{2}", clock) is None for clock in clocks):
+        raise ValueError("Use a 24-hour time in H:MM or HH:MM format.")
+    start_clock, end_clock = (time.strptime(clock, "%H:%M") for clock in clocks)
+    if start_clock == end_clock:
+        raise ValueError("An interval cannot have identical start and end times.")
+    try:
+        start_day = day + timedelta(days=1) if next_day else day
+        start_at = datetime.combine(start_day, start_clock)
+        end_at = datetime.combine(start_day, end_clock)
+        if end_clock < start_clock:
+            end_at += timedelta(days=1)
+    except OverflowError as error:
+        raise ValueError(
+            "Scheduled interval exceeds the supported date range."
+        ) from error
+    return Interval(start_at, end_at)
+
+
 @dataclass(frozen=True)
 class Day:
     date: date
@@ -225,15 +247,7 @@ def import_markdown(text: str, day: date) -> Day:
             match = re.fullmatch(r"- (\d{1,2}:\d{2}) - (\d{1,2}:\d{2})", line)
             if match is None:
                 raise ValueError(f"Invalid scheduled interval: {line}")
-            start_clock, end_clock = (time.strptime(v, "%H:%M") for v in match.groups())
-            start, end = (datetime.combine(day, v) for v in (start_clock, end_clock))
-            if end == start:
-                raise ValueError(
-                    "An interval cannot have identical start and end times."
-                )
-            if end < start:
-                end += timedelta(days=1)
-            intervals.append(Interval(start, end))
+            intervals.append(parse_interval(day, *match.groups()))
         elif mode in ("## scored", "## unscored"):
             if mode == "## scored":
                 match = row.fullmatch(line)

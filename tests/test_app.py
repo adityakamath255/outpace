@@ -1,14 +1,27 @@
 import asyncio
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
+from io import StringIO
 
 import pytest
+from rich.console import Console
 from textual.screen import ModalScreen
-from textual.widgets import Input, Static
+from textual.widgets import Button, Checkbox, Footer, Input, Static
 
-from todo.app import TodoApp
+from todo.app import TodoApp, section_row
 from todo.db import Store
-from todo.model import Section, Task, empty_day, points
+from todo.model import Interval, Section, Task, empty_day, points
+
+
+def footer_action(app, action):
+    return next(key for key in app.query_one(Footer).children if key.action == action)
+
+
+def test_section_share_is_not_truncated():
+    section = Section("Tasks", (Task("Practice", points("5")),))
+    output = StringIO()
+    Console(file=output, width=44).print(section_row(section, points("5")))
+    assert "100.00% of total" in output.getvalue()
 
 
 def test_app_starts(tmp_path):
@@ -45,7 +58,8 @@ def test_task_dialogs_open(app, key):
 def test_task_changes_save_and_undo(app):
     async def exercise_tasks():
         async with app.run_test(size=(110, 45)) as pilot:
-            assert await pilot.click("#add-task")
+            await pilot.pause()
+            assert await pilot.click(footer_action(app, "add"))
             await pilot.press(*"read daily")
             assert app.screen.query_one("#title", Input).value == "read daily"
             await pilot.press("tab")
@@ -97,7 +111,7 @@ def test_task_changes_save_and_undo(app):
             await pilot.press("u")
             assert app.day == before_move
 
-            assert await pilot.click("#delete-task")
+            assert await pilot.click(footer_action(app, "delete"))
             assert await pilot.click("#delete")
             assert all(task.id != added.id for _, task in app.day.tasks())
             await pilot.press("u")
@@ -106,6 +120,36 @@ def test_task_changes_save_and_undo(app):
         assert Store(app.store.path).load(app.day.date) == app.day
 
     asyncio.run(exercise_tasks())
+
+
+def test_panes_keep_selection_and_edits_work_after_resize(app):
+    async def switch_panes():
+        async with app.run_test(size=(80, 24)) as pilot:
+            selected = app.selected()
+            await pilot.press("l")
+            assert app.focused.id == "sidebar"
+            await pilot.resize_terminal(60, 24)
+            assert not app.query_one("#task-pane").display
+            assert app.query_one("#sidebar").display
+            assert app.selected() == selected
+            await pilot.press("e")
+            assert isinstance(app.screen, ModalScreen)
+            assert app.screen.query_one("#title", Input).value == selected[1].title
+            await pilot.press("escape")
+            assert await pilot.click("#toggle-view")
+            assert app.focused.id == "tasks"
+            assert app.query_one("#task-pane").display
+            assert not app.query_one("#sidebar").display
+            await pilot.press("right")
+            assert app.focused.id == "sidebar"
+            await pilot.resize_terminal(80, 24)
+            assert app.query_one("#task-pane").display
+            assert app.query_one("#sidebar").display
+            await pilot.press("left")
+            assert app.focused.id == "tasks"
+            assert app.selected() == selected
+
+    asyncio.run(switch_panes())
 
 
 def test_failed_save_keeps_form_and_does_not_change_history(app):
@@ -127,3 +171,123 @@ def test_failed_save_keeps_form_and_does_not_change_history(app):
             assert Store(app.store.path).load(original.date) == concurrent
 
     asyncio.run(fail_save())
+
+
+def test_schedule_edit_saves_recalculates_and_undoes(app):
+    original = app.day
+
+    async def edit_schedule():
+        async with app.run_test(size=(110, 45)) as pilot:
+            assert await pilot.click("#edit-schedule")
+            rows = list(app.screen.query(".interval-row"))
+            assert await pilot.click(rows[1].query_one(Button))
+            await pilot.press("ctrl+n")
+            assert await pilot.click("#add-interval")
+            rows = list(app.screen.query(".interval-row"))
+            for row, start, end, next_day in (
+                (rows[0], "09:00", "12:00", False),
+                (rows[1], "23:00", "01:00", False),
+                (rows[2], "01:30", "02:00", True),
+            ):
+                row.query_one(".interval-start", Input).value = start
+                row.query_one(".interval-end", Input).value = end
+                row.query_one(Checkbox).value = next_day
+            assert app.day == original
+            assert await pilot.click("#save")
+            assert app.day.intervals == (
+                Interval(datetime(2026, 11, 1, 9), datetime(2026, 11, 1, 12)),
+                Interval(datetime(2026, 11, 1, 23), datetime(2026, 11, 2, 1)),
+                Interval(datetime(2026, 11, 2, 1, 30), datetime(2026, 11, 2, 2)),
+            )
+            assert app.day.sections == original.sections
+            assert "05:30:00" in str(app.query_one("#time", Static).content)
+            assert Store(app.store.path).load(original.date) == app.day
+            await pilot.press("u")
+            assert app.day == original
+            assert Store(app.store.path).load(original.date) == original
+
+    asyncio.run(edit_schedule())
+
+
+def test_schedule_overlap_preserves_draft_and_cancel_discards_it(app):
+    original = app.day
+
+    async def reject_overlap():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("s")
+            end = app.screen.query(".interval-end").first(Input)
+            end.value = "18:00"
+            await pilot.press("ctrl+enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert end.value == "18:00"
+            assert "overlap" in str(app.screen.query_one("#error", Static).content)
+            assert app.day == original
+            assert not app.history
+            assert Store(app.store.path).load(original.date) == original
+            await pilot.press("escape")
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day == original
+
+    asyncio.run(reject_overlap())
+
+
+def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):
+    async def clear_schedule():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("s")
+            for row in list(app.screen.query(".interval-row")):
+                row.query_one(Button).press()
+                await pilot.pause()
+            await pilot.press("ctrl+enter")
+            assert app.day.intervals == ()
+            assert Store(app.store.path).load(app.day.date) == app.day
+            await pilot.press("s")
+            assert app.focused.id == "add-interval"
+            await pilot.press("ctrl+n")
+            assert app.focused.has_class("interval-start")
+            app.screen.query_one(".interval-start", Input).value = "08:00"
+            app.screen.query_one(".interval-end", Input).value = "09:00"
+            await pilot.press("ctrl+enter")
+            assert app.day.intervals == (
+                Interval(datetime(2026, 11, 1, 8), datetime(2026, 11, 1, 9)),
+            )
+
+    asyncio.run(clear_schedule())
+
+
+def test_schedule_save_conflict_preserves_draft_and_other_changes(app):
+    original = app.day
+    section, task = next(original.tasks())
+    concurrent = original.put_task(replace(task, title="Changed elsewhere"), section.id)
+
+    async def reject_conflict():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("s")
+            start = app.screen.query(".interval-start").first(Input)
+            start.value = "08:00"
+            Store(app.store.path).save(concurrent, expected=original)
+            await pilot.press("ctrl+enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert start.value == "08:00"
+            assert "changed" in str(app.screen.query_one("#error", Static).content)
+            assert app.day == original
+            assert not app.history
+            assert Store(app.store.path).load(original.date) == concurrent
+
+    asyncio.run(reject_conflict())
+
+
+@pytest.mark.parametrize("size", [(80, 24), (60, 24)])
+def test_schedule_controls_fit_their_labels(app, size):
+    async def check_labels():
+        async with app.run_test(size=size) as pilot:
+            await pilot.press("s")
+            row = app.screen.query(".interval-row").first()
+            for control in (row.query_one(Checkbox), row.query_one(Button)):
+                needed = control.get_content_width(row.size, app.size)
+                assert control.content_size.width >= needed
+                assert control.region.right <= row.content_region.right
+            for clock in row.query(Input):
+                assert clock.content_size.width >= len(clock.value) + 1
+
+    asyncio.run(check_labels())

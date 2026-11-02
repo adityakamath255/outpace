@@ -8,23 +8,34 @@ from pathlib import Path
 from platformdirs import user_data_path
 from rich.table import Table
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Input, Label, OptionList, Select, Static
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Footer,
+    Input,
+    Label,
+    OptionList,
+    Select,
+    Static,
+)
 from textual.widgets.option_list import Option
 
 from .db import Store
 from .model import (
     Day,
+    Interval,
     Section,
     Task,
     duration,
     empty_day,
     import_markdown,
     number,
+    parse_interval,
     per_point,
     percentage,
     points,
@@ -35,14 +46,48 @@ from .model import (
 
 
 def task_row(marker: str, title: str, points: str, estimate: str, style: str) -> Table:
-    table = Table.grid(padding=(0, 1), expand=True)
-    table.add_column(width=3)
+    table = Table.grid(padding=(0, 1), collapse_padding=True, expand=True)
+    table.add_column(width=1)
     table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
-    table.add_column(width=11, justify="right")
-    table.add_column(width=8, justify="right")
+    table.add_column(width=9, justify="right", no_wrap=True, overflow="ellipsis")
+    table.add_column(width=6, justify="right", no_wrap=True, overflow="ellipsis")
     table.add_row(
         *(Text(value, style=style) for value in (marker, title, points, estimate))
     )
+    return table
+
+
+def progress_text(
+    label: str, value: str, progress: Fraction | None, color: str
+) -> Text:
+    text = Text(label + "\n", style="bold cyan")
+    text.append(value, style=f"bold {color}")
+    text.append(
+        "  " + percentage(progress) + ("%" if progress is not None else ""),
+        style=color,
+    )
+    if progress is not None:
+        filled = int(progress * 20)
+        text.append("\n" + "━" * filled, style=color)
+        text.append("─" * (20 - filled), style="dim")
+    return text
+
+
+def section_row(section: Section, total: Fraction) -> Table:
+    earned, available = score(section.tasks)
+    if available:
+        summary = (
+            f"{number(earned)}/{number(available)}  "
+            f"{percentage(ratio(available, total))}% of total"
+        )
+    else:
+        summary = (
+            f"{sum(task.complete for task in section.tasks)}/{len(section.tasks)} done"
+        )
+    table = Table.grid(padding=(0, 1), expand=True)
+    table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+    table.add_column(justify="right", no_wrap=True, overflow="ellipsis")
+    table.add_row(Text(section.title, style="bold cyan"), Text(summary, style="cyan"))
     return table
 
 
@@ -221,6 +266,114 @@ class DeleteTask(ModalScreen):
         self.dismiss()
 
 
+class IntervalRow(Horizontal):
+    def __init__(self, list_date: date, interval: Interval | None = None):
+        super().__init__(classes="interval-row")
+        self.list_date = list_date
+        self.initial_interval = interval
+
+    def compose(self) -> ComposeResult:
+        interval = self.initial_interval
+        with Vertical(classes="interval-clock"):
+            yield Label("Start")
+            yield Input(
+                f"{interval.start:%H:%M}" if interval else "",
+                placeholder="07:30",
+                classes="interval-start",
+            )
+        with Vertical(classes="interval-clock"):
+            yield Label("End")
+            yield Input(
+                f"{interval.end:%H:%M}" if interval else "",
+                placeholder="11:00",
+                classes="interval-end",
+            )
+        yield Checkbox(
+            "Starts next day",
+            value=interval is not None and interval.start.date() > self.list_date,
+        )
+        yield Button("Remove", classes="remove-interval")
+
+    def read_interval(self) -> Interval:
+        return parse_interval(
+            self.list_date,
+            self.query_one(".interval-start", Input).value,
+            self.query_one(".interval-end", Input).value,
+            next_day=self.query_one(Checkbox).value,
+        )
+
+    @on(Button.Pressed, ".remove-interval")
+    async def remove_interval(self, event: Button.Pressed) -> None:
+        event.stop()
+        await self.remove()
+
+
+class ScheduleEditor(ModalScreen):
+    BINDINGS = [
+        ("escape", "dismiss", "Cancel"),
+        ("ctrl+enter", "save", "Save"),
+        ("ctrl+n", "add_interval", "Add interval"),
+    ]
+
+    def __init__(self, day: Day):
+        super().__init__()
+        self.edited_day = day
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(classes="dialog", id="schedule-dialog"):
+            yield Label("Edit schedule", classes="dialog-title")
+            yield Static(
+                "Use 24-hour times. An end before its start means overnight. "
+                "Tick Starts next day for an interval beginning after midnight. "
+                "Remove all intervals to clear the schedule.",
+                classes="muted",
+            )
+            with Vertical(id="interval-rows"):
+                for interval in self.edited_day.intervals:
+                    yield IntervalRow(self.edited_day.date, interval)
+            yield Button("Add interval", id="add-interval")
+            yield Static("", id="error", markup=False)
+            with Horizontal(classes="dialog-buttons"):
+                yield Button("Cancel", id="cancel")
+                yield Button("Save", id="save", variant="primary")
+
+    def on_mount(self) -> None:
+        first_start = next(iter(self.query(".interval-start")), None)
+        if first_start is None:
+            self.query_one("#add-interval", Button).focus()
+        else:
+            first_start.focus()
+
+    def on_resize(self) -> None:
+        self.set_class(self.size.width < 72, "narrow")
+
+    @on(Button.Pressed, "#add-interval")
+    async def action_add_interval(self) -> None:
+        row = IntervalRow(self.edited_day.date)
+        await self.query_one("#interval-rows", Vertical).mount(row)
+        row.query_one(".interval-start", Input).focus()
+
+    @on(Button.Pressed, "#save")
+    def action_save(self) -> None:
+        try:
+            intervals = tuple(
+                sorted(
+                    (row.read_interval() for row in self.query(IntervalRow)),
+                    key=lambda interval: interval.start,
+                )
+            )
+            day = replace(self.app.day, intervals=intervals)
+            self.app.save_change(day, "Schedule saved.")
+        except (ValueError, sqlite3.Error, OSError) as error:
+            self.query_one("#error", Static).update(str(error))
+            return
+        self.dismiss()
+
+    @on(Button.Pressed, "#cancel")
+    def cancel(self) -> None:
+        self.dismiss()
+
+
 class TodoApp(App):
     CSS_PATH = "app.tcss"
     TITLE = "todo"
@@ -228,14 +381,16 @@ class TodoApp(App):
     BINDINGS = [
         Binding("a", "add", "Add"),
         Binding("e", "edit", "Edit"),
-        Binding("space", "complete", "Complete"),
+        Binding("s", "schedule", "Schedule"),
+        Binding("space", "complete", "Done"),
         Binding("d,delete", "delete", "Delete"),
         Binding("u", "undo", "Undo"),
         Binding("J", "move(1)", "Move down", show=False),
         Binding("K", "move(-1)", "Move up", show=False),
         Binding("h,left", "tasks", "Tasks", show=False),
         Binding("l,right", "details", "Details", show=False),
-        Binding("q,ctrl+q", "quit", "Quit"),
+        Binding("q", "quit", "Quit"),
+        Binding("ctrl+q", "quit", "Quit", show=False),
     ]
 
     def __init__(self, store: Store, day: Day):
@@ -245,44 +400,69 @@ class TodoApp(App):
         self.history: list[Day] = []
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="heading"):
-            yield Static("TODAY", id="wordmark")
-            yield Static("", id="date", markup=False)
-        with Horizontal(id="overview"):
-            yield Static("", id="score", classes="metric", markup=False)
-            yield Static("", id="time", classes="metric", markup=False)
-            yield Static("", id="difference", classes="metric", markup=False)
+        with Horizontal(id="view-switch"):
+            yield Static("Tasks", id="view-title")
+            yield Button("Analytics →", id="toggle-view", compact=True)
         with Horizontal(id="body"):
             with Vertical(id="task-pane"):
                 yield Static(
-                    task_row("", "TASKS", "POINTS", "ESTIMATE", "bold"),
+                    task_row("", "Task", "Points", "Est.", "bold cyan"),
                     id="columns",
                 )
                 yield TaskList(id="tasks")
-                with Horizontal(id="task-buttons"):
-                    yield Button("Add", id="add-task")
-                    yield Button("Edit", id="edit-task")
-                    yield Button("Complete", id="complete-task")
-                    yield Button("Delete", id="delete-task")
+                yield Static("Add your first task with a or Add below.", id="empty")
             with VerticalScroll(id="sidebar"):
+                yield Static("", id="score", markup=False)
+                yield Static("", id="time", markup=False)
+                yield Static("", id="difference", markup=False)
                 yield Static("", id="pace", markup=False)
                 yield Static("", id="details", markup=False)
-                yield Static("", id="sections", markup=False)
+                yield Button("Edit schedule", id="edit-schedule", compact=True)
+                yield Static("", id="schedule", markup=False)
+                yield Static("", id="estimates", markup=False)
+        yield Static(
+            "The list needs 60 columns and 12 rows.\nResize the terminal, or q to quit.",
+            id="too-small",
+        )
         yield Static("", id="status", markup=False)
-        yield Footer()
+        yield Footer(compact=True)
 
     def on_mount(self) -> None:
         self.theme = "ansi-dark"
         self.redraw()
-        self.refresh_clock()
         self.set_interval(1, self.refresh_clock)
         self.query_one("#tasks", TaskList).focus()
         self.query_one("#status", Static).update(
-            "Changes save immediately. Enter edits points; e edits the task."
+            "Enter points · Space complete · J/K move · h/l panes"
         )
 
-    def on_resize(self) -> None:
-        self.default_screen.set_class(self.size.width < 95, "compact")
+    def on_resize(self, event: events.Resize) -> None:
+        self.default_screen.set_class(event.size.width < 80, "compact")
+        self.default_screen.set_class(
+            event.size.width < 60 or event.size.height < 12, "too-small"
+        )
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if isinstance(event.widget, TaskList):
+            self.show_analytics(False)
+        elif event.widget.id == "sidebar" or any(
+            ancestor.id == "sidebar" for ancestor in event.widget.ancestors
+        ):
+            self.show_analytics(True)
+
+    def show_analytics(self, show: bool) -> None:
+        self.default_screen.set_class(show, "analytics")
+        self.query_one("#view-title", Static).update("Analytics" if show else "Tasks")
+        self.query_one("#toggle-view", Button).label = (
+            "← Tasks" if show else "Analytics →"
+        )
+
+    @on(Button.Pressed, "#toggle-view")
+    def toggle_view(self) -> None:
+        if self.default_screen.has_class("analytics"):
+            self.action_tasks()
+        else:
+            self.action_details()
 
     def selected(self) -> tuple[Section, Task] | None:
         option = self.query_one("#tasks", TaskList).highlighted_option
@@ -296,26 +476,24 @@ class TodoApp(App):
         task_id = task_id or (selected[1].id if selected else None)
         old_index = widget.highlighted or 0
         options = []
+        _, total = score(task for _, task in self.day.tasks())
         for section in self.day.sections:
-            earned, available = score(section.tasks)
-            label = Text(section.title, style="bold cyan")
-            if available:
-                label.append(f"   {number(earned)} / {number(available)}", style="cyan")
+            label = section_row(section, total)
             options.append(Option(label, id=f"section-{section.id}", disabled=True))
             for task in section.tasks:
                 if task.complete:
-                    state, color = "[x]", "green"
+                    state, color = "✓", "green"
                 elif task.earned:
-                    state, color = "[~]", "yellow"
+                    state, color = "~", "yellow"
                 else:
-                    state, color = "[ ]", "default"
+                    state, color = "", "default"
                 row = task_row(
                     state,
                     task.title,
-                    f"{number(task.earned)} / {number(task.available)}"
+                    f"{number(task.earned)}/{number(task.available)}"
                     if task.available is not None
-                    else "unscored",
-                    f"{task.minutes}m" if task.minutes is not None else "?",
+                    else "",
+                    f"{task.minutes}m" if task.minutes is not None else "",
                     color,
                 )
                 options.append(Option(row, id=task.id))
@@ -332,6 +510,7 @@ class TodoApp(App):
             )
         else:
             widget.highlighted = None
+        self.query_one("#empty", Static).display = not enabled
         self.refresh_clock()
         self.refresh_details()
 
@@ -347,103 +526,89 @@ class TodoApp(App):
             if progress is not None and time_ratio is not None
             else None
         )
-        self.query_one("#date", Static).update(
-            f"{day.date:%A, %d %B %Y}   {now:%H:%M:%S}"
+        self.query_one("#score", Static).update(
+            progress_text(
+                "Points", f"{number(earned)} / {number(available)}", progress, "green"
+            )
         )
-        self.query_one("#wordmark", Static).update(
-            "TODAY" if day.date == now.date() else "DAY"
-        )
-        for widget_id, label, value, detail, color in (
-            (
-                "score",
-                "POINTS",
-                f"{number(earned)} / {number(available)}",
-                percentage(progress) + ("%" if progress is not None else ""),
-                "green",
-            ),
-            (
-                "time",
-                "SCHEDULED TIME",
+        self.query_one("#time", Static).update(
+            progress_text(
+                "Scheduled time",
                 f"{duration(elapsed)} / {duration(total)}",
-                percentage(time_ratio) + ("%" if time_ratio is not None else ""),
+                time_ratio,
                 "cyan",
-            ),
-            (
-                "difference",
-                "SCORE - TIME",
-                percentage(difference, signed=True)
-                + (" pp" if difference is not None else ""),
-                "percentage points",
-                "yellow",
-            ),
-        ):
-            text = Text(label + "\n", style="dim")
-            text.append(value + "\n", style=f"bold {color}")
-            text.append(detail, style="dim")
-            self.query_one(f"#{widget_id}", Static).update(text)
-        text = Text("PACE\n", style="bold cyan")
+            )
+        )
+        text = Text("Score − time  ")
         text.append(
-            f"Time / point       {per_point(total, available)}\n", style="default"
+            percentage(difference, signed=True)
+            + (" pp" if difference is not None else ""),
+            style="bold yellow",
+        )
+        self.query_one("#difference", Static).update(text)
+        text = Text("Pace\n", style="bold cyan")
+        text.append(
+            f"Time / point      {per_point(total, available)}\n", style="default"
         )
         text.append(
-            f"Remaining / point  {per_point(total - elapsed, available - earned)}\n",
+            f"Remaining / point {per_point(total - elapsed, available - earned)}",
             style="default",
         )
-        text.append("minutes:seconds\n\n", style="dim")
-        text.append("SCHEDULE\n", style="bold cyan")
+        text.append("\nminutes:seconds", style="dim")
+        self.query_one("#pace", Static).update(text)
+        text = Text()
         if not day.intervals:
             text.append("No intervals\n", style="dim")
         for interval in day.intervals:
-            suffix = " (+1 day)" if interval.end.date() > interval.start.date() else ""
+            start_offset = (interval.start.date() - day.date).days
+            end_offset = (interval.end.date() - day.date).days
+            start = f"{interval.start:%H:%M}" + (
+                f" (+{start_offset} day)" if start_offset else ""
+            )
+            end = f"{interval.end:%H:%M}" + (
+                f" (+{end_offset} day)" if end_offset else ""
+            )
             text.append(
-                f"{interval.start:%H:%M} to {interval.end:%H:%M}{suffix}\n",
+                f"{start} to {end}\n",
                 style="default",
             )
-        self.query_one("#pace", Static).update(text)
+        text.rstrip()
+        self.query_one("#schedule", Static).update(text)
 
     def refresh_details(self) -> None:
         selected = self.selected()
-        text = Text("SELECTED TASK\n", style="bold cyan")
+        text = Text("Selected task\n", style="bold magenta")
         if selected:
             section, task = selected
-            text.append(task.title + "\n\n", style="bold default")
+            text.append(task.title, style="bold default")
+            if task.available is not None:
+                text.append(
+                    f"\n{number(task.earned)} / {number(task.available)} points",
+                    style="default",
+                )
             if task.minutes is not None:
-                text.append(f"Estimate           {task.minutes}m\n", style="default")
+                text.append(f"\nEstimate          {task.minutes}m", style="default")
                 if task.available is not None:
                     text.append(
-                        f"Minutes / point    {per_point(task.minutes * 60, task.available)}\n",
+                        f"\nTime / point      {per_point(task.minutes * 60, task.available)}",
                         style="default",
                     )
-                    text.append("For the full task\n", style="dim")
+                    text.append("\nFull estimate, minutes:seconds", style="dim")
             else:
-                text.append("Estimate not set\n", style="dim")
-            text.append(f"\n{section.title}\n", style="default")
+                text.append("\nEstimate not set", style="dim")
         else:
             text.append("Add a task to begin.\n", style="dim")
         self.query_one("#details", Static).update(text)
-        text = Text("SECTIONS\n", style="bold cyan")
-        _, total = score(task for _, task in self.day.tasks())
-        for section in self.day.sections:
-            earned, available = score(section.tasks)
-            text.append(section.title + "\n", style="default")
-            if available:
-                text.append(
-                    f"{number(earned)} / {number(available)}   {percentage(ratio(available, total))}% of total\n\n",
-                    style="dim",
-                )
-            else:
-                done = sum(task.complete for task in section.tasks)
-                text.append(f"{done} / {len(section.tasks)} complete\n\n", style="dim")
         tasks = [task for _, task in self.day.tasks()]
         estimates = [task.minutes for task in tasks if task.minutes is not None]
-        text.append("ESTIMATES\n", style="bold cyan")
+        text = Text("Estimates\n", style="bold cyan")
         text.append(
             f"{sum(estimates)}m across {len(estimates)} tasks\n", style="default"
         )
         missing = len(tasks) - len(estimates)
         if missing:
             text.append(f"{missing} without an estimate", style="dim")
-        self.query_one("#sections", Static).update(text)
+        self.query_one("#estimates", Static).update(text)
 
     @on(OptionList.OptionHighlighted, "#tasks")
     def highlighted(self) -> None:
@@ -479,6 +644,10 @@ class TodoApp(App):
     def action_edit(self) -> None:
         if selected := self.selected():
             self.push_screen(TaskEditor(self.day, selected[1], selected[0].id))
+
+    @on(Button.Pressed, "#edit-schedule")
+    def action_schedule(self) -> None:
+        self.push_screen(ScheduleEditor(self.day))
 
     def action_complete(self) -> None:
         if selected := self.selected():
@@ -527,21 +696,12 @@ class TodoApp(App):
         self.query_one("#status", Static).update("Last change undone.")
 
     def action_tasks(self) -> None:
+        self.show_analytics(False)
         self.query_one("#tasks", TaskList).focus()
 
     def action_details(self) -> None:
+        self.show_analytics(True)
         self.query_one("#sidebar", VerticalScroll).focus()
-
-    @on(Button.Pressed)
-    def task_button(self, event: Button.Pressed) -> None:
-        actions = {
-            "add-task": self.action_add,
-            "edit-task": self.action_edit,
-            "complete-task": self.action_complete,
-            "delete-task": self.action_delete,
-        }
-        if action := actions.get(event.button.id):
-            action()
 
 
 def main() -> None:
