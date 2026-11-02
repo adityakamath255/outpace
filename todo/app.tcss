@@ -111,12 +111,13 @@ Screen {
     margin-bottom: 1;
 }
 
-#edit-schedule {
+.pane-action {
     min-width: 0;
     width: auto;
     color: ansi_cyan;
     background: ansi_default;
-    text-style: bold;
+    text-style: bold underline;
+    margin-bottom: 1;
 }
 
 #status {
@@ -221,13 +222,13 @@ ModalScreen {
     margin-right: 1;
 }
 
-.dialog-buttons {
+DialogButtons {
     height: 3;
     align-horizontal: right;
     margin-top: 1;
 }
 
-.dialog-buttons Button {
+DialogButtons Button {
     margin-left: 1;
 }
 

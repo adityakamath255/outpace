@@ -13,6 +13,7 @@ from todo.model import (
     empty_day,
     number,
     parse_interval,
+    parse_minutes,
     per_point,
     percentage,
     points,
@@ -22,6 +23,36 @@ from todo.model import (
 )
 
 DAY = date(2026, 11, 1)
+
+
+def test_minutes_parser_accepts_blank_or_positive_whole_minutes():
+    assert parse_minutes(" \t ") is None
+    assert parse_minutes(" 40 ") == 40
+
+
+@pytest.mark.parametrize("text", ["bad", "1.5", "0", "-1"])
+def test_minutes_parser_rejects_invalid_estimates(text):
+    with pytest.raises(ValueError, match="positive whole number"):
+        parse_minutes(text)
+
+
+def test_rename_section_preserves_other_day_data_and_allows_duplicate_titles():
+    first = Section("One", (Task("Practice", points("2"), points("1")),))
+    second = Section("Two", (Task("Note", None, checked=True),))
+    day = replace(empty_day(DAY), sections=(first, second))
+
+    renamed = day.rename_section(first.id, " Two ")
+
+    assert renamed == replace(day, sections=(replace(first, title="Two"), second))
+    assert day.sections == (first, second)
+
+
+def test_rename_section_rejects_blank_titles_and_unknown_ids():
+    day = empty_day(DAY)
+    with pytest.raises(ValueError, match="title"):
+        day.rename_section(day.sections[0].id, " \t ")
+    with pytest.raises(ValueError, match="section"):
+        day.rename_section("missing", "Work")
 
 
 def test_points_and_estimates_are_independent():

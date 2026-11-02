@@ -7,6 +7,8 @@ from fractions import Fraction
 from itertools import pairwise
 from uuid import uuid4
 
+_MINUTES_ERROR = "Estimated minutes must be a positive whole number."
+
 
 def identifier() -> str:
     return uuid4().hex
@@ -16,6 +18,19 @@ def points(value: str) -> Fraction:
     if not re.fullmatch(r"\d+(?:\.\d+)?", value.strip()):
         raise ValueError("Use a nonnegative decimal for points, such as 2.5.")
     return Fraction(value.strip())
+
+
+def parse_minutes(value: str) -> int | None:
+    value = value.strip()
+    if not value:
+        return None
+    try:
+        minutes = int(value)
+    except ValueError as error:
+        raise ValueError(_MINUTES_ERROR) from error
+    if not value.isdecimal() or minutes <= 0:
+        raise ValueError(_MINUTES_ERROR)
+    return minutes
 
 
 @dataclass(frozen=True)
@@ -41,7 +56,7 @@ class Task:
         elif self.earned:
             raise ValueError("Unscored tasks cannot have earned points.")
         if self.minutes is not None and self.minutes <= 0:
-            raise ValueError("Estimated minutes must be a positive whole number.")
+            raise ValueError(_MINUTES_ERROR)
 
     @property
     def complete(self) -> bool:
@@ -115,6 +130,20 @@ class Day:
 
     def tasks(self) -> Iterator[tuple[Section, Task]]:
         return ((section, task) for section in self.sections for task in section.tasks)
+
+    def rename_section(self, section_id: str, title: str) -> Day:
+        title = title.strip()
+        if not title:
+            raise ValueError("Give the section a title.")
+        if not any(section.id == section_id for section in self.sections):
+            raise ValueError("Choose a section.")
+        return replace(
+            self,
+            sections=tuple(
+                replace(section, title=title) if section.id == section_id else section
+                for section in self.sections
+            ),
+        )
 
     def put_task(self, task: Task, section_id: str) -> Day:
         if not any(section.id == section_id for section in self.sections):

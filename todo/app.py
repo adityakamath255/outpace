@@ -11,7 +11,7 @@ from rich.text import Text
 from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -35,6 +35,7 @@ from .model import (
     empty_day,
     number,
     parse_interval,
+    parse_minutes,
     per_point,
     percentage,
     points,
@@ -111,6 +112,19 @@ class TaskList(OptionList):
     ]
 
 
+class DialogButtons(Horizontal):
+    BINDINGS = [
+        Binding("left,up,h,k", "move(-1)", "Previous button", show=False),
+        Binding("right,down,j,l", "move(1)", "Next button", show=False),
+    ]
+
+    def action_move(self, offset: int) -> None:
+        buttons = [button for button in self.query(Button) if not button.disabled]
+        focused = self.screen.focused
+        if focused in buttons:
+            buttons[(buttons.index(focused) + offset) % len(buttons)].focus()
+
+
 class DayPicker(ModalScreen):
     BINDINGS = [("escape", "dismiss", "Cancel"), ("ctrl+enter", "open", "Open")]
 
@@ -119,7 +133,7 @@ class DayPicker(ModalScreen):
         self.initial_date = list_date
 
     def compose(self) -> ComposeResult:
-        with Container(classes="dialog", id="day-dialog"):
+        with VerticalScroll(classes="dialog", id="day-dialog"):
             yield Label("Open a day's list", classes="dialog-title")
             yield Label("Date (YYYY-MM-DD)", classes="field-label")
             yield Input(
@@ -130,7 +144,7 @@ class DayPicker(ModalScreen):
                 classes="muted",
             )
             yield Static("", id="error", markup=False)
-            with Horizontal(classes="dialog-buttons"):
+            with DialogButtons():
                 yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
                 yield Button(
                     "Open (Ctrl+Enter)",
@@ -169,7 +183,7 @@ class PointsEditor(ModalScreen):
         self.section_id = section_id
 
     def compose(self) -> ComposeResult:
-        with Container(classes="dialog", id="points-dialog"):
+        with VerticalScroll(classes="dialog", id="points-dialog"):
             yield Label("Earned points", classes="dialog-title")
             yield Static(self.edited_task.title, markup=False, classes="muted")
             yield Label(
@@ -180,30 +194,30 @@ class PointsEditor(ModalScreen):
                 number(self.edited_task.earned), id="earned", select_on_focus=True
             )
             yield Static("", id="error", markup=False)
-            with Horizontal(classes="dialog-buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Save", id="save", variant="primary")
+            with DialogButtons():
+                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
+                yield Button(
+                    "Save (Ctrl+Enter)",
+                    id="save",
+                    variant="primary",
+                    action="screen.save",
+                )
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
 
     @on(Input.Submitted)
-    @on(Button.Pressed, "#save")
     def action_save(self) -> None:
         try:
             task = replace(
                 self.edited_task, earned=points(self.query_one("#earned", Input).value)
             )
             self.app.save_change(
-                self.app.day.put_task(task, self.section_id), "Points saved.", task.id
+                self.app.day.put_task(task, self.section_id), task_id=task.id
             )
         except (ValueError, sqlite3.Error, OSError) as error:
             self.query_one("#error", Static).update(str(error))
             return
-        self.dismiss()
-
-    @on(Button.Pressed, "#cancel")
-    def cancel(self) -> None:
         self.dismiss()
 
 
@@ -250,28 +264,29 @@ class TaskEditor(ModalScreen):
             yield Label("Or create a section", classes="field-label")
             yield Input(placeholder="New section name (optional)", id="new-section")
             yield Static("", id="error", markup=False)
-            with Horizontal(classes="dialog-buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Save", id="save", variant="primary")
+            with DialogButtons():
+                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
+                yield Button(
+                    "Save (Ctrl+Enter)",
+                    id="save",
+                    variant="primary",
+                    action="screen.save",
+                )
 
     def on_mount(self) -> None:
         self.query_one("#title", Input).focus()
 
-    @on(Button.Pressed, "#save")
     def action_save(self) -> None:
         try:
             available_text = self.query_one("#available", Input).value.strip()
             available = points(available_text) if available_text else None
-            minute_text = self.query_one("#minutes", Input).value.strip()
-            if minute_text and not minute_text.isdecimal():
-                raise ValueError("Estimated minutes must be a positive whole number.")
             task = Task(
                 title=self.query_one("#title", Input).value.strip(),
                 available=available,
                 earned=points(self.query_one("#earned", Input).value)
                 if available is not None
                 else Fraction(0),
-                minutes=int(minute_text) if minute_text else None,
+                minutes=parse_minutes(self.query_one("#minutes", Input).value),
                 checked=self.edited_task.complete
                 if self.edited_task and available is None
                 else False,
@@ -285,46 +300,101 @@ class TaskEditor(ModalScreen):
                 day = replace(day, sections=day.sections + (section,))
                 section_id = section.id
             day = day.put_task(task, section_id)
-            self.app.save_change(day, "Task saved.", task.id)
+            self.app.save_change(day, task_id=task.id)
         except (ValueError, sqlite3.Error, OSError) as error:
             self.query_one("#error", Static).update(str(error))
             return
         self.dismiss()
 
-    @on(Button.Pressed, "#cancel")
-    def cancel(self) -> None:
+
+class SectionEditor(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Cancel"), ("ctrl+enter", "save", "Save")]
+
+    def __init__(self, day: Day, section_id: str):
+        super().__init__()
+        self.edited_day = day
+        self.section_id = section_id
+
+    def compose(self) -> ComposeResult:
+        section = next(s for s in self.edited_day.sections if s.id == self.section_id)
+        with VerticalScroll(classes="dialog", id="section-dialog"):
+            yield Label("Rename section", classes="dialog-title")
+            yield Label("Section", classes="field-label")
+            yield Select(
+                [
+                    (Text(f"{index}. {s.title}"), s.id)
+                    for index, s in enumerate(self.edited_day.sections, 1)
+                ],
+                value=self.section_id,
+                allow_blank=False,
+                id="section",
+            )
+            yield Label("Name", classes="field-label")
+            yield Input(section.title, id="section-name", select_on_focus=True)
+            yield Static("", id="error", markup=False)
+            with DialogButtons():
+                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
+                yield Button(
+                    "Save (Ctrl+Enter)",
+                    id="save",
+                    variant="primary",
+                    action="screen.save",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one(Input).focus()
+
+    @on(Select.Changed, "#section")
+    def section_changed(self, event: Select.Changed) -> None:
+        if event.value is Select.NULL:
+            return
+        section = next(s for s in self.edited_day.sections if s.id == event.value)
+        self.query_one(Input).value = section.title
+
+    @on(Input.Submitted)
+    def action_save(self) -> None:
+        try:
+            day = self.app.day.rename_section(
+                self.query_one("#section", Select).value,
+                self.query_one("#section-name", Input).value,
+            )
+            self.app.save_change(day)
+        except (ValueError, sqlite3.Error, OSError) as error:
+            self.query_one("#error", Static).update(str(error))
+            return
         self.dismiss()
 
 
 class DeleteTask(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel")]
+    BINDINGS = [("escape", "dismiss", "Cancel"), ("y", "delete", "Delete")]
 
     def __init__(self, task: Task):
         super().__init__()
         self.task_to_delete = task
 
     def compose(self) -> ComposeResult:
-        with Container(classes="dialog", id="delete-dialog"):
+        with VerticalScroll(classes="dialog", id="delete-dialog"):
             yield Label("Delete task?", classes="dialog-title")
             yield Static(self.task_to_delete.title, markup=False)
             yield Static(
                 "You can undo this until you switch days or quit.", classes="muted"
             )
             yield Static("", id="error", markup=False)
-            with Horizontal(classes="dialog-buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Delete", id="delete", variant="error")
-
-    @on(Button.Pressed)
-    def button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "delete":
-            try:
-                self.app.save_change(
-                    self.app.day.remove_task(self.task_to_delete.id), "Task deleted."
+            with DialogButtons():
+                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
+                yield Button(
+                    "Delete (y)", id="delete", variant="error", action="screen.delete"
                 )
-            except (ValueError, sqlite3.Error, OSError) as error:
-                self.query_one("#error", Static).update(str(error))
-                return
+
+    def on_mount(self) -> None:
+        self.query_one("#cancel", Button).focus()
+
+    def action_delete(self) -> None:
+        try:
+            self.app.save_change(self.app.day.remove_task(self.task_to_delete.id))
+        except (ValueError, sqlite3.Error, OSError) as error:
+            self.query_one("#error", Static).update(str(error))
+            return
         self.dismiss()
 
 
@@ -395,9 +465,14 @@ class ScheduleEditor(ModalScreen):
                     yield IntervalRow(self.edited_day.date, interval)
             yield Button("Add interval", id="add-interval")
             yield Static("", id="error", markup=False)
-            with Horizontal(classes="dialog-buttons"):
-                yield Button("Cancel", id="cancel")
-                yield Button("Save", id="save", variant="primary")
+            with DialogButtons():
+                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
+                yield Button(
+                    "Save (Ctrl+Enter)",
+                    id="save",
+                    variant="primary",
+                    action="screen.save",
+                )
 
     def on_mount(self) -> None:
         first_start = next(iter(self.query(".interval-start")), None)
@@ -415,7 +490,6 @@ class ScheduleEditor(ModalScreen):
         await self.query_one("#interval-rows", Vertical).mount(row)
         row.query_one(".interval-start", Input).focus()
 
-    @on(Button.Pressed, "#save")
     def action_save(self) -> None:
         try:
             intervals = tuple(
@@ -425,14 +499,10 @@ class ScheduleEditor(ModalScreen):
                 )
             )
             day = replace(self.app.day, intervals=intervals)
-            self.app.save_change(day, "Schedule saved.")
+            self.app.save_change(day)
         except (ValueError, sqlite3.Error, OSError) as error:
             self.query_one("#error", Static).update(str(error))
             return
-        self.dismiss()
-
-    @on(Button.Pressed, "#cancel")
-    def cancel(self) -> None:
         self.dismiss()
 
 
@@ -443,6 +513,7 @@ class TodoApp(App):
     BINDINGS = [
         Binding("a", "add", "Add"),
         Binding("e", "edit", "Edit"),
+        Binding("r", "rename_section", "Rename section", show=False),
         Binding("s", "schedule", "Schedule"),
         Binding("space", "complete", "Done"),
         Binding("d,delete", "delete", "Delete"),
@@ -518,10 +589,18 @@ class TodoApp(App):
                 yield Static("", id="pace", markup=False)
                 yield Static("", id="details", markup=False)
                 yield Button(
+                    "Rename section (r)",
+                    id="rename-section",
+                    compact=True,
+                    action="app.rename_section",
+                    classes="pane-action",
+                )
+                yield Button(
                     "Edit schedule",
                     id="edit-schedule",
                     compact=True,
                     action="app.schedule",
+                    classes="pane-action",
                 )
                 yield Static("", id="schedule", markup=False)
                 yield Static("", id="estimates", markup=False)
@@ -538,7 +617,7 @@ class TodoApp(App):
         self.set_interval(1, self.refresh_clock)
         self.query_one("#tasks", TaskList).focus()
         self.query_one("#status", Static).update(
-            "Enter points · Space complete · J/K move · h/l panes"
+            "Enter points · r section · J/K move · h/l panes"
         )
 
     def on_resize(self, event: events.Resize) -> None:
@@ -596,9 +675,7 @@ class TodoApp(App):
         self.query_one("#tasks", TaskList).highlighted = None
         self.redraw()
         self.action_tasks()
-        self.query_one("#status", Static).update(
-            "List opened. Undo starts fresh for this day."
-        )
+        self.notify("Undo starts fresh for this day.", timeout=2)
 
     def selected(self) -> tuple[Section, Task] | None:
         option = self.query_one("#tasks", TaskList).highlighted_option
@@ -769,7 +846,7 @@ class TodoApp(App):
             else:
                 self.push_screen(PointsEditor(task, section.id))
 
-    def save_change(self, day: Day, message: str, task_id: str | None = None) -> None:
+    def save_change(self, day: Day, task_id: str | None = None) -> None:
         if day == self.day:
             return
         self.store.save(day, expected=self.day if self.persisted else None)
@@ -777,7 +854,6 @@ class TodoApp(App):
         self.day = day
         self.persisted = True
         self.redraw(task_id)
-        self.query_one("#status", Static).update(message)
 
     def action_add(self) -> None:
         selected = self.selected()
@@ -791,6 +867,11 @@ class TodoApp(App):
         if selected := self.selected():
             self.push_screen(TaskEditor(self.day, selected[1], selected[0].id))
 
+    def action_rename_section(self) -> None:
+        selected = self.selected()
+        section = selected[0] if selected else self.day.sections[0]
+        self.push_screen(SectionEditor(self.day, section.id))
+
     def action_schedule(self) -> None:
         self.push_screen(ScheduleEditor(self.day))
 
@@ -800,8 +881,7 @@ class TodoApp(App):
             try:
                 self.save_change(
                     self.day.put_task(task.toggle(), section.id),
-                    "Completion saved.",
-                    task.id,
+                    task_id=task.id,
                 )
             except (ValueError, sqlite3.Error, OSError) as error:
                 self.notify(
@@ -817,8 +897,7 @@ class TodoApp(App):
             try:
                 self.save_change(
                     self.day.move_task(selected[1].id, offset),
-                    "Task moved.",
-                    selected[1].id,
+                    task_id=selected[1].id,
                 )
             except (ValueError, sqlite3.Error, OSError) as error:
                 self.notify(
@@ -827,7 +906,7 @@ class TodoApp(App):
 
     def action_undo(self) -> None:
         if not self.history:
-            self.query_one("#status", Static).update("Nothing to undo.")
+            self.notify("Nothing to undo.", timeout=2)
             return
         previous, was_persisted = self.history[-1]
         try:
@@ -842,7 +921,6 @@ class TodoApp(App):
         self.day = previous
         self.persisted = was_persisted
         self.redraw()
-        self.query_one("#status", Static).update("Last change undone.")
 
     def action_tasks(self) -> None:
         self.show_analytics(False)

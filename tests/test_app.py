@@ -8,7 +8,7 @@ from io import StringIO
 import pytest
 from rich.console import Console
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Footer, Input, Static
+from textual.widgets import Button, Checkbox, Footer, Input, Select, Static
 
 from todo.app import TodoApp, main, schedule_status, section_row
 from todo.db import Store
@@ -183,6 +183,142 @@ def test_failed_save_keeps_form_and_does_not_change_history(app):
             assert Store(app.store.path).load(original.date) == concurrent
 
     asyncio.run(fail_save())
+
+
+def test_saving_points_keeps_navigation_hints_visible(app):
+    async def edit_points():
+        async with app.run_test() as pilot:
+            hints = str(app.query_one("#status", Static).content)
+            await pilot.press("enter")
+            app.screen.query_one("#earned", Input).value = "2.5"
+            await pilot.press("enter")
+            assert next(app.day.tasks())[1].earned == points("2.5")
+            assert str(app.query_one("#status", Static).content) == hints
+
+    asyncio.run(edit_points())
+
+
+def test_dialog_buttons_support_arrows_and_vim_without_changing_input_keys(app):
+    async def use_dialog_keys():
+        async with app.run_test() as pilot:
+            await pilot.press("enter")
+            app.screen.query_one("#cancel", Button).focus()
+            await pilot.pause()
+            for key, target in (
+                ("right", "save"),
+                ("h", "cancel"),
+                ("j", "save"),
+                ("up", "cancel"),
+                ("l", "save"),
+                ("k", "cancel"),
+                ("down", "save"),
+                ("left", "cancel"),
+            ):
+                await pilot.press(key)
+                assert app.focused.id == target
+            await pilot.press("shift+tab")
+            field = app.screen.query_one("#earned", Input)
+            assert app.focused is field
+            field.value = ""
+            await pilot.press(*"hjkl", "left", "X")
+            assert field.value == "hjkXl"
+            await pilot.press("escape")
+
+    asyncio.run(use_dialog_keys())
+
+
+def test_sections_can_be_renamed_including_empty_duplicate_named_groups(app):
+    empty = Section("Tasks")
+    original = replace(app.day, sections=app.day.sections + (empty,))
+    app.store.save(original, expected=app.day)
+    app = TodoApp(app.store, original.date)
+
+    async def rename_sections():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("r", *"Work", "ctrl+enter")
+            assert app.day.sections[0].title == "Work"
+            assert app.day.sections[0].id == original.sections[0].id
+            assert app.day.sections[0].tasks == original.sections[0].tasks
+            assert app.store.load(original.date) == app.day
+            await pilot.press("u")
+            assert app.day == original
+
+            assert await pilot.click("#rename-section")
+            await pilot.press("shift+tab", "enter", "end", "enter", "tab")
+            assert app.screen.query_one("#section", Select).value == empty.id
+            assert app.screen.query_one(Input).value == empty.title
+            await pilot.press(*"Later")
+            assert await pilot.click("#save")
+            assert app.day.sections[0] == original.sections[0]
+            assert app.day.sections[1] == replace(empty, title="Later")
+            assert app.store.load(original.date) == app.day
+            await pilot.press("u")
+            assert app.day == original
+            assert app.store.load(original.date) == original
+
+    asyncio.run(rename_sections())
+
+
+def test_section_rename_rejects_blank_names_and_preserves_failed_drafts(app):
+    original = app.day
+    changed = original.rename_section(original.sections[0].id, "Changed elsewhere")
+
+    async def fail_rename():
+        async with app.run_test() as pilot:
+            await pilot.press("r")
+            field = app.screen.query_one("#section-name", Input)
+            field.value = " "
+            await pilot.press("ctrl+enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert app.day == original
+            assert str(app.screen.query_one("#error", Static).content)
+            assert app.store.load(original.date) == original
+
+            field.value = "Keep this draft"
+            Store(app.store.path).save(changed, expected=original)
+            await pilot.press("ctrl+enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert field.value == "Keep this draft"
+            assert "changed" in str(app.screen.query_one("#error", Static).content)
+            assert app.day == original
+            assert app.store.load(original.date) == changed
+            await pilot.press("escape")
+
+    asyncio.run(fail_rename())
+
+
+def test_section_rename_keeps_focused_actions_reachable_in_a_short_terminal(app):
+    async def rename_in_short_terminal():
+        async with app.run_test(size=(60, 12)) as pilot:
+            await pilot.press("r")
+            app.screen.query_one(Input).value = "Work"
+            await pilot.press("tab", "tab")
+            assert app.focused.id == "save"
+            assert await pilot.click("#save")
+            assert app.day.sections[0].title == "Work"
+
+    asyncio.run(rename_in_short_terminal())
+
+
+def test_delete_has_a_two_key_confirmation_and_cancel_stays_the_default(app):
+    original = app.day
+
+    async def delete_and_undo():
+        async with app.run_test() as pilot:
+            await pilot.press("d")
+            assert app.focused.id == "cancel"
+            await pilot.press("enter")
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day == original
+            await pilot.press("d", "y")
+            assert not isinstance(app.screen, ModalScreen)
+            assert not list(app.day.tasks())
+            assert app.store.load(original.date) == app.day
+            await pilot.press("u")
+            assert app.day == original
+            assert app.store.load(original.date) == original
+
+    asyncio.run(delete_and_undo())
 
 
 def test_ended_schedule_is_explained_instead_of_showing_zero_remaining(
