@@ -52,7 +52,10 @@ def task_row(marker: str, title: str, points: str, estimate: str, style: str) ->
     table.add_column(width=9, justify="right", no_wrap=True, overflow="ellipsis")
     table.add_column(width=6, justify="right", no_wrap=True, overflow="ellipsis")
     table.add_row(
-        *(Text(value, style=style) for value in (marker, title, points, estimate))
+        Text(marker, style=style),
+        Text(title),
+        Text(points, style=style),
+        Text(estimate, style="dim"),
     )
     return table
 
@@ -60,16 +63,14 @@ def task_row(marker: str, title: str, points: str, estimate: str, style: str) ->
 def progress_text(
     label: str, value: str, progress: Fraction | None, color: str
 ) -> Text:
-    text = Text(label + "\n", style="bold cyan")
+    text = Text()
+    text.append(f"{label:<8}", style="dim")
     text.append(value, style=f"bold {color}")
-    text.append(
-        "  " + percentage(progress) + ("%" if progress is not None else ""),
-        style=color,
-    )
     if progress is not None:
         filled = int(progress * 20)
         text.append("\n" + "━" * filled, style=color)
         text.append("─" * (20 - filled), style="dim")
+        text.append(f" {percentage(progress):>6}%", style=color)
     return text
 
 
@@ -87,7 +88,7 @@ def section_row(section: Section, total: Fraction) -> Table:
     table = Table.grid(padding=(0, 1), expand=True)
     table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
     table.add_column(justify="right", no_wrap=True, overflow="ellipsis")
-    table.add_row(Text(section.title, style="bold cyan"), Text(summary, style="cyan"))
+    table.add_row(Text(section.title, style="bold magenta"), Text(summary, style="dim"))
     return table
 
 
@@ -519,12 +520,67 @@ class ScheduleEditor(ModalScreen):
         self.dismiss()
 
 
+class ReuseDay(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(self, list_date: date, sources: tuple[date, ...]):
+        super().__init__()
+        self.list_date = list_date
+        self.sources = sources
+
+    def compose(self) -> ComposeResult:
+        source = next((d for d in self.sources if d < self.list_date), self.sources[0])
+        with VerticalScroll(classes="dialog", id="reuse-dialog"):
+            yield Label("Reuse a day's list", classes="dialog-title")
+            yield Label("Copy from (Space/Down to choose)", classes="field-label")
+            yield FormSelect(
+                [(f"{d:%a} {d.isoformat()}", d) for d in self.sources],
+                value=source,
+                allow_blank=False,
+                id="source-day",
+            )
+            notice = Text()
+            notice.append(
+                f"Replaces the list for {self.list_date.isoformat()}.\n", style="bold"
+            )
+            notice.append(
+                "Copies tasks, sections, points, estimates, and schedule. "
+                "Earned points and completion reset.\n\n"
+            )
+            notice.append("Undo restores this day's previous list.", style="dim")
+            yield Static(notice, id="reuse-notice")
+            yield Static("", id="error", markup=False)
+            with DialogButtons():
+                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
+                yield Button(
+                    "Reuse (Enter)",
+                    id="save",
+                    variant="primary",
+                    action="screen.save",
+                )
+
+    def on_mount(self) -> None:
+        self.query_one(Select).focus()
+
+    def action_save(self) -> None:
+        try:
+            source = self.app.store.load(self.query_one(Select).value)
+            if source is None:
+                raise ValueError("That day's list no longer exists. Choose another.")
+            self.app.save_change(source.copy_to(self.list_date))
+        except (ValueError, sqlite3.Error, OSError) as error:
+            self.query_one("#error", Static).update(str(error))
+            return
+        self.dismiss()
+
+
 class TodoApp(App):
     CSS_PATH = "app.tcss"
     TITLE = "todo"
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
         Binding("a", "add", "Add"),
+        Binding("c", "reuse", "Reuse"),
         Binding("e", "edit", "Edit"),
         Binding("r", "rename_section", "Rename section", show=False),
         Binding("s", "schedule", "Schedule"),
@@ -590,17 +646,16 @@ class TodoApp(App):
         with Horizontal(id="body"):
             with Vertical(id="task-pane"):
                 yield Static(
-                    task_row("", "Task", "Points", "Est.", "bold cyan"),
+                    task_row("", "Task", "Points", "Est.", "dim"),
                     id="columns",
                 )
                 yield TaskList(id="tasks")
-                yield Static("Press a to add your first task.", id="empty")
+                yield Static("a  Add a task\nc  Reuse a day's list", id="empty")
             with AnalyticsPane(id="sidebar"):
                 yield Static("", id="score", markup=False)
                 yield Static("", id="time", markup=False)
                 yield Static("", id="difference", markup=False)
                 yield Static("", id="pace", markup=False)
-                yield Static("", id="details", markup=False)
                 yield Button(
                     "Schedule",
                     id="edit-schedule",
@@ -610,6 +665,7 @@ class TodoApp(App):
                 )
                 yield Static("", id="schedule", markup=False)
                 yield Static("", id="estimates", markup=False)
+                yield Static("", id="details", markup=False)
         yield Static("", id="status", markup=False)
         yield Footer(compact=True)
 
@@ -710,7 +766,7 @@ class TodoApp(App):
                 if task.complete:
                     state, color = "✓", "green"
                 elif task.earned:
-                    state, color = "~", "yellow"
+                    state, color = "~", "blue"
                 else:
                     state, color = "", "default"
                 row = task_row(
@@ -765,7 +821,7 @@ class TodoApp(App):
             )
         )
         text = progress_text(
-            "Scheduled time",
+            "Time",
             f"{duration(elapsed)} / {duration(total)}",
             time_ratio,
             "cyan",
@@ -776,10 +832,10 @@ class TodoApp(App):
         text.append(
             percentage(difference, signed=True)
             + (" pp" if difference is not None else ""),
-            style="bold yellow",
+            style="bold magenta",
         )
         self.query_one("#difference", Static).update(text)
-        text = Text("Pace\n", style="bold cyan")
+        text = Text()
         text.append(
             f"Time / point      {per_point(total, available)}\n", style="default"
         )
@@ -792,9 +848,9 @@ class TodoApp(App):
         text.append(f"Remaining / point {remaining}", style="default")
         text.append("\nminutes:seconds", style="dim")
         self.query_one("#pace", Static).update(text)
+        for selector in ("#time", "#difference", "#pace", "#schedule"):
+            self.query_one(selector).display = bool(day.intervals)
         text = Text()
-        if not day.intervals:
-            text.append("No intervals\n", style="dim")
         for interval in day.intervals:
             start_offset = (interval.start.date() - day.date).days
             end_offset = (interval.end.date() - day.date).days
@@ -813,31 +869,23 @@ class TodoApp(App):
 
     def refresh_details(self) -> None:
         selected = self.selected()
-        text = Text("Selected task\n", style="bold magenta")
+        text = Text()
+        text.append("Task\n", style="bold magenta")
         if selected:
             section, task = selected
             text.append(task.title, style="bold default")
-            if task.available is not None:
+            if task.minutes is not None and task.available is not None:
                 text.append(
-                    f"\n{number(task.earned)} / {number(task.available)} points",
-                    style="default",
+                    f"\nTime / point      {per_point(task.minutes * 60, task.available)}",
+                    style="blue",
                 )
-            if task.minutes is not None:
-                text.append(f"\nEstimate          {task.minutes}m", style="default")
-                if task.available is not None:
-                    text.append(
-                        f"\nTime / point      {per_point(task.minutes * 60, task.available)}",
-                        style="default",
-                    )
-                    text.append("\nFull estimate, minutes:seconds", style="dim")
-            else:
-                text.append("\nEstimate not set", style="dim")
-        else:
-            text.append("Add a task to begin.\n", style="dim")
+                text.append(" mm:ss", style="dim")
         self.query_one("#details", Static).update(text)
+        self.query_one("#details", Static).display = selected is not None
         tasks = [task for _, task in self.day.tasks()]
         estimates = [task.minutes for task in tasks if task.minutes is not None]
-        text = Text("Estimates (h:mm)\n", style="bold cyan")
+        text = Text()
+        text.append("Estimates (h:mm)\n", style="bold magenta")
         hours, minutes = divmod(sum(estimates), 60)
         text.append(
             f"{hours}:{minutes:02d} across {len(estimates)} tasks\n", style="default"
@@ -846,6 +894,7 @@ class TodoApp(App):
         if missing:
             text.append(f"{missing} without an estimate", style="dim")
         self.query_one("#estimates", Static).update(text)
+        self.query_one("#estimates", Static).display = bool(estimates)
         self.refresh_navigation()
 
     @on(OptionList.OptionHighlighted, "#tasks")
@@ -878,6 +927,17 @@ class TodoApp(App):
                 self.day, None, selected[0].id if selected else self.day.sections[0].id
             )
         )
+
+    def action_reuse(self) -> None:
+        try:
+            sources = tuple(d for d in self.store.list_dates() if d != self.day.date)
+        except (ValueError, sqlite3.Error, OSError) as error:
+            self.notify(str(error), title="Could not open lists", severity="error")
+            return
+        if not sources:
+            self.notify("No other saved lists yet.")
+            return
+        self.push_screen(ReuseDay(self.day.date, sources))
 
     def action_edit(self) -> None:
         if selected := self.selected():

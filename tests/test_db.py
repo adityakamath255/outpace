@@ -10,6 +10,22 @@ from todo.model import Day, Section, Task, empty_day, points
 DAY = date(2026, 11, 1)
 
 
+def test_list_dates_returns_saved_days_newest_first_and_copies_coexist(tmp_path):
+    store = Store(tmp_path / "todo.sqlite3")
+    assert store.list_dates() == ()
+    source = replace(
+        empty_day(DAY), sections=(Section("Tasks", (Task("Practice", points("2")),)),)
+    )
+    copied = source.copy_to(date(2026, 11, 3))
+    store.save(copied)
+    store.save(source)
+
+    assert store.list_dates() == (copied.date, source.date)
+    assert store.load(source.date) == source
+    assert store.load(copied.date) == copied
+    assert store.load(date(2026, 11, 2)) is None
+
+
 def test_save_reopen_edit_and_restore_snapshot(tmp_path):
     path = tmp_path / "nested" / "todo.sqlite3"
     store = Store(path)

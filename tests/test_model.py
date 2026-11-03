@@ -63,6 +63,50 @@ def test_new_days_have_no_schedule():
     assert time_progress(day.intervals, datetime(2026, 11, 1, 12)) == (0, 0)
 
 
+def test_copy_day_preserves_the_plan_and_resets_progress_with_new_identities():
+    source = Day(
+        DAY,
+        (
+            parse_interval(DAY, "23:00", "01:00"),
+            parse_interval(DAY, "01:30", "02:00", next_day=True),
+        ),
+        (
+            Section(
+                "Tasks",
+                (
+                    Task("Practice", points("2.5"), points("0.75"), 20),
+                    Task("Finished", points("1"), points("1")),
+                    Task("Remember", None, checked=True),
+                ),
+            ),
+            Section("Empty"),
+        ),
+    )
+
+    copied = source.copy_to(date(2026, 11, 3))
+
+    assert copied.date == date(2026, 11, 3)
+    assert copied.intervals == (
+        Interval(datetime(2026, 11, 3, 23), datetime(2026, 11, 4, 1)),
+        Interval(datetime(2026, 11, 4, 1, 30), datetime(2026, 11, 4, 2)),
+    )
+    assert [section.title for section in copied.sections] == ["Tasks", "Empty"]
+    assert not copied.sections[1].tasks
+    for (_, original), (_, task) in zip(source.tasks(), copied.tasks(), strict=True):
+        assert task == replace(original, id=task.id, earned=Fraction(0), checked=False)
+    original_ids = {s.id for s in source.sections} | {t.id for _, t in source.tasks()}
+    copied_ids = {s.id for s in copied.sections} | {t.id for _, t in copied.tasks()}
+    assert original_ids.isdisjoint(copied_ids)
+    assert next(source.tasks())[1].earned == points("0.75")
+    assert source.sections[0].tasks[2].checked
+
+
+def test_copy_day_reports_an_unrepresentable_schedule():
+    source = replace(empty_day(DAY), intervals=(parse_interval(DAY, "23:00", "01:00"),))
+    with pytest.raises(ValueError, match="date range"):
+        source.copy_to(date.max)
+
+
 def test_rename_section_preserves_other_day_data_and_allows_duplicate_titles():
     first = Section("One", (Task("Practice", points("2"), points("1")),))
     second = Section("Two", (Task("Note", None, checked=True),))

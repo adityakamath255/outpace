@@ -60,6 +60,15 @@ class Store:
             connection.execute("BEGIN")
             return self._load(connection, day)
 
+    def list_dates(self) -> tuple[date, ...]:
+        with self.connect() as connection:
+            return tuple(
+                date.fromisoformat(value)
+                for (value,) in connection.execute(
+                    "SELECT date FROM days ORDER BY date DESC"
+                )
+            )
+
     def _load(self, connection: sqlite3.Connection, day: date) -> Day | None:
         if not connection.execute(
             "SELECT 1 FROM days WHERE date = ?", (day.isoformat(),)

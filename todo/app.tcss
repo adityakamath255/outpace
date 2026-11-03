@@ -4,14 +4,15 @@ Screen {
 }
 
 #day-bar {
-    height: 1;
+    height: 2;
     margin: 1 1 0 1;
+    border-bottom: solid ansi_black;
 }
 
 #day-bar Button {
     min-width: 0;
     width: auto;
-    color: ansi_cyan;
+    color: ansi_default;
     background: ansi_default;
 }
 
@@ -19,22 +20,26 @@ Screen {
     width: 1fr;
     text-align: left;
     text-style: bold underline;
+    color: ansi_magenta;
 }
 
 #day-bar Button:hover,
 #day-bar Button:focus {
-    text-style: reverse;
+    background: ansi_black;
+    color: ansi_blue;
+    text-style: bold;
 }
 
 #day-bar #today {
-    background: ansi_blue;
-    color: ansi_bright_white;
+    background: ansi_default;
+    color: ansi_blue;
     text-style: bold;
 }
 
 #day-bar #today:hover,
 #day-bar #today:focus {
-    text-style: bold reverse;
+    background: ansi_black;
+    text-style: bold;
 }
 
 #day-bar #toggle-view {
@@ -54,6 +59,7 @@ Screen {
     height: 1;
     padding: 0 1;
     margin-right: 1;
+    text-style: dim;
 }
 
 #tasks {
@@ -64,7 +70,7 @@ Screen {
     scrollbar-size: 1 1;
     scrollbar-gutter: stable;
     scrollbar-background: ansi_default;
-    scrollbar-color: ansi_cyan;
+    scrollbar-color: ansi_blue;
 }
 
 #tasks:focus {
@@ -76,8 +82,8 @@ Screen {
 }
 
 #tasks > .option-list--option-highlighted {
-    background: ansi_blue;
-    color: ansi_bright_white;
+    background: ansi_black;
+    color: ansi_default;
     text-style: none;
 }
 
@@ -86,12 +92,12 @@ Screen {
 }
 
 #tasks > .option-list--option-hover {
-    background: ansi_bright_black;
-    text-style: none;
+    background: ansi_black;
+    text-style: underline;
 }
 
 #tasks > .option-list--option-disabled {
-    color: ansi_cyan;
+    color: ansi_magenta;
     text-style: bold;
     opacity: 100%;
     padding: 0 1;
@@ -100,21 +106,21 @@ Screen {
 #empty {
     height: auto;
     padding: 1;
-    color: ansi_cyan;
+    color: ansi_blue;
 }
 
 #sidebar {
     width: 32;
     margin-left: 1;
     padding-left: 1;
-    border-left: solid ansi_bright_black;
+    border-left: solid ansi_black;
     scrollbar-size: 1 1;
     scrollbar-background: ansi_default;
-    scrollbar-color: ansi_cyan;
+    scrollbar-color: ansi_blue;
 }
 
 #sidebar:focus-within {
-    border-left: solid ansi_cyan;
+    border-left: solid ansi_blue;
 }
 
 #sidebar Static {
@@ -122,13 +128,17 @@ Screen {
     margin-bottom: 1;
 }
 
+#sidebar #difference {
+    margin-bottom: 0;
+}
+
 .pane-action {
     min-width: 0;
     width: auto;
-    color: ansi_cyan;
+    color: ansi_blue;
     background: ansi_default;
     text-style: bold underline;
-    margin-bottom: 1;
+    margin-bottom: 0;
 }
 
 #status {
@@ -137,6 +147,7 @@ Screen {
     color: ansi_default;
     text-wrap: nowrap;
     text-overflow: ellipsis;
+    text-style: dim;
 }
 
 Footer {
@@ -144,7 +155,7 @@ Footer {
 }
 
 FooterKey > .footer-key--key {
-    color: ansi_cyan;
+    color: ansi_blue;
     background: ansi_default;
 }
 
@@ -183,7 +194,7 @@ Screen.narrow #day-bar {
     grid-size: 4;
     grid-columns: 1fr 1fr 1fr 2fr;
     grid-rows: 1 1;
-    height: 2;
+    height: 3;
 }
 
 Screen.narrow #day-bar #choose-day {
@@ -205,14 +216,14 @@ ModalScreen {
     max-width: 95%;
     height: auto;
     max-height: 95%;
-    border: round ansi_cyan;
+    border: round ansi_blue;
     padding: 1 2;
     background: ansi_default;
 }
 
 .dialog-title {
     text-style: bold;
-    color: ansi_cyan;
+    color: ansi_magenta;
     margin-bottom: 1;
 }
 
@@ -222,6 +233,40 @@ ModalScreen {
 
 .dialog Input, .dialog Select {
     width: 1fr;
+}
+
+.dialog Input {
+    background: ansi_default;
+    border: tall ansi_black;
+}
+
+.dialog Input:focus {
+    border: tall ansi_blue;
+}
+
+.dialog Button {
+    min-width: 0;
+    height: 1;
+    border: none;
+    padding: 0 1;
+    background: ansi_black;
+    color: ansi_default;
+}
+
+.dialog Button.-primary {
+    background: ansi_blue;
+    color: ansi_black;
+    text-style: bold;
+}
+
+.dialog Button.-error {
+    background: ansi_red;
+    color: ansi_black;
+}
+
+.dialog Button:focus,
+.dialog Button:hover {
+    text-style: bold underline;
 }
 
 .fields {
@@ -235,7 +280,7 @@ ModalScreen {
 }
 
 DialogButtons {
-    height: 3;
+    height: 1;
     align-horizontal: right;
     margin-top: 1;
 }
@@ -245,7 +290,8 @@ DialogButtons Button {
 }
 
 .muted {
-    color: ansi_bright_black;
+    color: ansi_default;
+    text-style: dim;
 }
 
 #error {

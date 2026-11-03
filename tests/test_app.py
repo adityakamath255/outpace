@@ -356,6 +356,74 @@ def test_enter_hint_matches_unscored_task_completion(app):
     asyncio.run(complete_unscored_task())
 
 
+@pytest.mark.parametrize("existing", [False, True])
+def test_reuse_copies_a_saved_day_and_undo_restores_the_destination(app, existing):
+    source = app.day
+    destination = empty_day(date(2026, 11, 2))
+    if existing:
+        destination = destination.put_task(
+            Task("Keep this plan", None, checked=True), destination.sections[0].id
+        )
+        app.store.save(destination)
+
+    async def reuse_day():
+        async with app.run_test() as pilot:
+            await pilot.press("]")
+            original = app.day
+            await pilot.press("c")
+            assert app.screen.query_one("#source-day", Select).value == source.date
+            assert "Replaces" in str(
+                app.screen.query_one("#reuse-notice", Static).content
+            )
+            await pilot.press("enter")
+            assert not isinstance(app.screen, ModalScreen)
+            copied = app.day
+            assert copied.date == destination.date
+            assert next(copied.tasks())[1].earned == 0
+            assert copied.intervals[0].start == datetime(2026, 11, 2, 7, 30)
+            assert app.store.load(source.date) == source
+            assert app.store.load(copied.date) == copied
+            await pilot.press("u")
+            assert app.day == original
+            assert app.store.load(original.date) == (original if existing else None)
+            assert app.store.load(source.date) == source
+
+    asyncio.run(reuse_day())
+
+
+def test_reuse_conflict_preserves_the_form_and_another_sessions_changes(app):
+    original = app.day
+    source = original.copy_to(date(2026, 10, 31))
+    app.store.save(source)
+    changed = original.rename_section(original.sections[0].id, "Changed elsewhere")
+
+    async def fail_reuse():
+        async with app.run_test() as pilot:
+            await pilot.press("c")
+            Store(app.store.path).save(changed, expected=original)
+            await pilot.press("enter")
+            assert isinstance(app.screen, ModalScreen)
+            assert app.screen.query_one("#source-day", Select).value == source.date
+            assert "changed" in str(app.screen.query_one("#error", Static).content)
+            assert app.day == original
+            assert not app.history
+            assert app.store.load(original.date) == changed
+            assert app.store.load(source.date) == source
+
+    asyncio.run(fail_reuse())
+
+
+def test_daily_analytics_fit_at_76_by_36(app):
+    async def check_analytics():
+        async with app.run_test(size=(76, 36)):
+            sidebar = app.query_one("#sidebar")
+            for selector in ("#score", "#time", "#pace", "#estimates", "#details"):
+                block = app.query_one(selector, Static)
+                assert block.region.bottom <= sidebar.content_region.bottom
+
+    asyncio.run(check_analytics())
+
+
 def test_total_estimate_uses_hours_and_minutes(app):
     section, _ = next(app.day.tasks())
 

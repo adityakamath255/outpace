@@ -146,6 +146,29 @@ class Day:
     def tasks(self) -> Iterator[tuple[Section, Task]]:
         return ((section, task) for section in self.sections for task in section.tasks)
 
+    def copy_to(self, list_date: date) -> Day:
+        offset = list_date - self.date
+        try:
+            intervals = tuple(
+                Interval(interval.start + offset, interval.end + offset)
+                for interval in self.intervals
+            )
+        except OverflowError as error:
+            raise ValueError(
+                "Scheduled interval exceeds the supported date range."
+            ) from error
+        sections = tuple(
+            Section(
+                section.title,
+                tuple(
+                    replace(task, id=identifier(), earned=Fraction(0), checked=False)
+                    for task in section.tasks
+                ),
+            )
+            for section in self.sections
+        )
+        return Day(list_date, intervals, sections)
+
     def rename_section(self, section_id: str, title: str) -> Day:
         title = title.strip()
         if not title:
