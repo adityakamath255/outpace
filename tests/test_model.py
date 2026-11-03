@@ -292,7 +292,7 @@ def test_sections_insert_move_and_remove():
     first, second = Section("One", (task,)), Section("Two")
     day = Day(DAY, (), (first, second))
     new = Section("")
-    assert day.insert_section(new, after=first.id).sections == (first, new, second)
+    assert day.insert_section(new, 1).sections == (first, new, second)
     assert day.move_section(first.id, 1).sections == (second, first)
     assert day.move_section(first.id, -1) == day
     assert day.remove_section(first.id).sections == (second,)

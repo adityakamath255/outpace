@@ -23,11 +23,10 @@ def stats_text(app):
     return output.getvalue()
 
 
-async def add_task(pilot, title, *, close=True):
-    await pilot.press("a")
+async def add_task(pilot, title):
+    await pilot.press("o")
     pilot.app.screen.query_one("#title", Input).value = title
-    if close:
-        await pilot.press("enter", "escape")
+    await pilot.press("enter", "escape")
 
 
 def footer_action(app, action):
@@ -80,7 +79,7 @@ def test_task_changes_save_and_undo(app):
     async def exercise_tasks():
         async with app.run_test(size=(110, 45)) as pilot:
             await pilot.pause()
-            assert await pilot.click(footer_action(app, "add"))
+            assert await pilot.click(footer_action(app, "add(True)"))
             await pilot.press(*"2.5", "tab", *"20", "tab", *"read daily", "enter")
             added = next(
                 task for _, task in app.day.tasks() if task.title == "read daily"
@@ -153,8 +152,8 @@ def test_reuse_copies_a_saved_day_and_undo_restores_the_destination(app, existin
     source = app.day
     destination = empty_day(date(2026, 11, 2))
     if existing:
-        destination = destination.add_task(
-            Task("Keep this plan", None, checked=True), destination.sections[0].id
+        destination = destination.insert_task(
+            Task("Keep this plan", None, checked=True), destination.sections[0].id, 0
         )
         app.store.save(destination)
 
@@ -188,7 +187,7 @@ def test_total_estimate_uses_hours_and_minutes(app):
     async def read_estimate():
         async with app.run_test():
             app.save_change(
-                app.day.add_task(Task("Read", None, minutes=190), section.id),
+                app.day.insert_task(Task("Read", None, minutes=190), section.id, 0),
                 "added Read",
             )
             assert "3h40m estimated across 2 tasks" in stats_text(app)
@@ -227,8 +226,10 @@ def test_selected_sections_are_renamed_and_blank_means_untitled(app):
 
     async def rename_sections():
         async with app.run_test(size=(110, 45)) as pilot:
-            # r on a task renames the task's section
-            await pilot.press("r", "ctrl+u", *"Work", "enter")
+            # Enter on a rule does nothing; e renames the section
+            await pilot.press("g", "enter")
+            assert not isinstance(app.screen, ModalScreen)
+            await pilot.press("e", "ctrl+u", *"Work", "enter")
             assert app.day.sections[0].title == "Work"
             assert app.day.sections[0].id == original.sections[0].id
             assert app.day.sections[0].tasks == original.sections[0].tasks
@@ -236,8 +237,8 @@ def test_selected_sections_are_renamed_and_blank_means_untitled(app):
             await pilot.press("u")
             assert app.day == original
 
-            # the last row is the empty section's rule; Enter on a rule renames it
-            await pilot.press("G", "enter", "ctrl+u", "enter")
+            # the last row is the empty section's rule; blank means untitled
+            await pilot.press("G", "e", "ctrl+u", "enter")
             assert app.day.sections[0] == original.sections[0]
             assert app.day.sections[1] == replace(empty, title="")
             assert app.store.load(original.date) == app.day
@@ -248,7 +249,7 @@ def test_selected_sections_are_renamed_and_blank_means_untitled(app):
     asyncio.run(rename_sections())
 
 
-def test_dd_deletes_without_a_dialog_and_undo_names_the_change(app, monkeypatch):
+def test_x_deletes_without_a_dialog_and_undo_names_the_change(app, monkeypatch):
     original = app.day
     messages = []
     monkeypatch.setattr(
@@ -257,9 +258,10 @@ def test_dd_deletes_without_a_dialog_and_undo_names_the_change(app, monkeypatch)
 
     async def delete_and_undo():
         async with app.run_test() as pilot:
-            await pilot.press("d", "G", "d")
-            assert app.day == original
+            # d is unbound, so a Vim habit of dd deletes nothing
             await pilot.press("d", "d")
+            assert app.day == original
+            await pilot.press("x")
             assert not isinstance(app.screen, ModalScreen)
             assert not list(app.day.tasks())
             assert app.store.load(original.date) == app.day
@@ -271,7 +273,7 @@ def test_dd_deletes_without_a_dialog_and_undo_names_the_change(app, monkeypatch)
             await add_task(pilot, "Second")
             await pilot.press("k")
             practice = app.selected()[1]
-            await pilot.press("d", "d")
+            await pilot.press("x")
             assert app.selected()[1].title == "Second"
             await pilot.press("u")
             assert app.selected()[1] == practice
@@ -315,7 +317,7 @@ def test_help_lists_every_key_binding(app):
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.press("question_mark")
             assert isinstance(app.screen, ModalScreen)
-            await pilot.press("a")
+            await pilot.press("o")
             assert not list(app.screen.query("#title"))
             await pilot.press("escape")
             assert not isinstance(app.screen, ModalScreen)
@@ -395,7 +397,7 @@ def test_day_switching_preserves_lists_and_creates_new_days(app):
             assert app.store.load(tomorrow.date) == app.day
             assert next(app.day.tasks())[1].title == "New task"
 
-            await pilot.press("ctrl+d", *original.date.isoformat(), "enter")
+            await pilot.press("T", *original.date.isoformat(), "enter")
             assert not isinstance(app.screen, ModalScreen)
             assert app.day == edited
             assert app.focused.id == "tasks"
@@ -417,9 +419,9 @@ def test_same_day_cancellation_and_invalid_dates_preserve_undo(app):
         async with app.run_test(size=(60, 24)) as pilot:
             await pilot.press("space")
             current = app.day
-            await pilot.press("ctrl+d", "enter")
+            await pilot.press("T", "enter")
             assert app.day == current
-            await pilot.press("ctrl+d")
+            await pilot.press("T")
             for invalid in ("2026-02-30", "20261102"):
                 app.screen.query_one(Input).value = invalid
                 await pilot.press("enter")
@@ -432,7 +434,7 @@ def test_same_day_cancellation_and_invalid_dates_preserve_undo(app):
             await pilot.press("escape")
             assert app.day == current
 
-            await pilot.press("e", "[", "]", "t", "ctrl+d")
+            await pilot.press("e", "[", "]", "t", "T")
             assert app.screen.query_one("#task-dialog")
             assert app.day == current
             await pilot.press("escape")
@@ -450,7 +452,7 @@ def test_failed_day_load_keeps_current_list_history_and_date_draft(app, monkeypa
         async with app.run_test() as pilot:
             await pilot.press("space")
             current = app.day
-            await pilot.press("ctrl+d")
+            await pilot.press("T")
             app.screen.query_one(Input).value = target.isoformat()
             with monkeypatch.context() as patch:
                 patch.setattr(app.store, "load", fail)
@@ -538,8 +540,10 @@ def test_keys_on_a_section_rule_act_on_the_section(app):
 
     async def edit_sections():
         async with app.run_test(size=(120, 35)) as pilot:
-            # o opens an untitled section below and selects its rule
-            await pilot.press("o")
+            # Esc cancels a new section; a blank name makes it untitled
+            await pilot.press("number_sign", "escape")
+            assert app.day == original
+            await pilot.press("number_sign", "enter")
             first, added = app.day.sections
             assert added.title == "" and not added.tasks
             assert app.selected() == (added, None)
@@ -549,8 +553,8 @@ def test_keys_on_a_section_rule_act_on_the_section(app):
             # a task moved past the end of its section joins the next one
             await pilot.press("G", "K", "K")
             assert app.day.sections[0].tasks == first.tasks
-            # dd on a rule deletes the section with its tasks
-            await pilot.press("g", "d", "d")
+            # x on a rule deletes the section with its tasks
+            await pilot.press("g", "x")
             assert [s.id for s in app.day.sections] == [first.id]
             assert not list(app.day.tasks())
             await pilot.press("u", "u", "u", "u")
@@ -575,10 +579,102 @@ def test_lowering_available_points_caps_earned_points(app):
 def test_deleting_a_sections_last_task_does_not_select_the_next_section(app):
     async def delete_twice():
         async with app.run_test(size=(110, 45)) as pilot:
-            await pilot.press("o")
+            await pilot.press("number_sign", "enter")
             await add_task(pilot, "Next")
-            await pilot.press("g", "j", "d", "d")
+            await pilot.press("g", "j", "x")
             section, task = app.selected()
             assert task is None and section.id == app.day.sections[0].id
 
     asyncio.run(delete_twice())
+
+
+def titles(day):
+    return [[task.title for task in section.tasks] for section in day.sections]
+
+
+def test_o_and_O_add_next_to_the_selected_row(app):
+    async def add_tasks():
+        async with app.run_test(size=(110, 45)) as pilot:
+            # further tasks in one dialog follow the previous one
+            await pilot.press("o")
+            for title in ("Below", "Further"):
+                app.screen.query_one("#title", Input).value = title
+                await pilot.press("enter")
+            await pilot.press("escape", "O")
+            app.screen.query_one("#title", Input).value = "Above"
+            await pilot.press("enter", "escape")
+            assert titles(app.day) == [["Practice", "Below", "Above", "Further"]]
+            # on a rule, o adds at the top of its section
+            await pilot.press("g")
+            await add_task(pilot, "First")
+            assert titles(app.day)[0][0] == "First"
+            assert app.store.load(app.day.date) == app.day
+
+    asyncio.run(add_tasks())
+
+
+def test_put_copies_the_last_deleted_row_and_resets_progress_on_other_days(app):
+    practice = app.day.sections[0].tasks[0]
+
+    def copies(day):
+        return [replace(task, id=practice.id) for _, task in day.tasks()]
+
+    async def put():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("p")
+            assert titles(app.day) == [["Practice"]]
+            await pilot.press("x", "p", "P")
+            assert copies(app.day) == [practice, practice]
+            ids = [task.id for _, task in app.day.tasks()]
+            assert len(set(ids)) == 2 and practice.id not in ids
+            await pilot.press("]", "p")
+            assert copies(app.day) == [replace(practice, earned=0)]
+            # a deleted section comes back with its tasks below the current one
+            await pilot.press("[", "number_sign", *"Other", "enter", "g", "x", "p")
+            assert titles(app.day) == [[], ["Practice", "Practice"]]
+            assert app.store.load(app.day.date) == app.day
+
+    asyncio.run(put())
+
+
+def test_braces_jump_between_sections_like_paragraphs(app):
+    a, b, c = (
+        Section("A", (Task("a1", None), Task("a2", None))),
+        Section("B"),
+        Section("C", (Task("c1", None),)),
+    )
+    app.store.save(replace(app.day, sections=(a, b, c)))
+    app = TodoApp(app.store, app.day.date)
+
+    async def jump():
+        async with app.run_test() as pilot:
+            visited = []
+            for key in "}}}}{{{{":
+                await pilot.press(key)
+                section, task = app.selected()
+                visited.append((task or section).title)
+            assert visited == ["B", "C", "c1", "c1", "C", "B", "A", "A"]
+            await pilot.press("G", "{")
+            assert app.selected() == (c, None)
+
+    asyncio.run(jump())
+
+
+def test_ctrl_d_and_ctrl_u_move_half_a_page(app):
+    tasks = tuple(Task(f"task {n}", None) for n in range(60))
+    app.store.save(replace(app.day, sections=(Section("Many", tasks),)))
+    app = TodoApp(app.store, app.day.date)
+
+    async def scroll():
+        async with app.run_test(size=(80, 24)) as pilot:
+            widget = app.query_one("#tasks")
+            half = widget.scrollable_content_region.height // 2
+            start = widget.highlighted
+            await pilot.press("ctrl+d")
+            assert widget.highlighted == start + half
+            await pilot.press("ctrl+u", "ctrl+u")
+            assert widget.highlighted == 0
+            await pilot.press(*["ctrl+d"] * 10)
+            assert widget.highlighted == widget.option_count - 1
+
+    asyncio.run(scroll())

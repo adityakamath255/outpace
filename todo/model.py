@@ -100,6 +100,12 @@ class Task:
             checked=False,
         )
 
+    def duplicate(self, *, keep_progress: bool) -> Task:
+        """The same plan under a new identity, with or without its progress."""
+        if keep_progress:
+            return replace(self, id=identifier())
+        return replace(self, id=identifier(), earned=Fraction(0), checked=False)
+
     def step(self, delta: int) -> Task:
         if self.available is None:
             return replace(self, checked=delta > 0)
@@ -117,6 +123,12 @@ class Section:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "title", self.title.strip())
+
+    def duplicate(self, *, keep_progress: bool) -> Section:
+        return Section(
+            self.title,
+            tuple(task.duplicate(keep_progress=keep_progress) for task in self.tasks),
+        )
 
 
 @dataclass(frozen=True)
@@ -229,16 +241,7 @@ class Day:
         return ((section, task) for section in self.sections for task in section.tasks)
 
     def copy_to(self, list_date: date) -> Day:
-        sections = tuple(
-            Section(
-                section.title,
-                tuple(
-                    replace(task, id=identifier(), earned=Fraction(0), checked=False)
-                    for task in section.tasks
-                ),
-            )
-            for section in self.sections
-        )
+        sections = tuple(s.duplicate(keep_progress=False) for s in self.sections)
         return Day(list_date, self.intervals, sections)
 
     def _section_index(self, section_id: str) -> int:
@@ -253,8 +256,7 @@ class Day:
         sections[index] = replace(sections[index], title=title)
         return replace(self, sections=tuple(sections))
 
-    def insert_section(self, section: Section, after: str) -> Day:
-        index = self._section_index(after) + 1
+    def insert_section(self, section: Section, index: int) -> Day:
         return replace(
             self,
             sections=self.sections[:index] + (section,) + self.sections[index:],
@@ -278,11 +280,12 @@ class Day:
             self, sections=self.sections[:index] + self.sections[index + 1 :]
         )
 
-    def add_task(self, task: Task, section_id: str) -> Day:
-        index = self._section_index(section_id)
+    def insert_task(self, task: Task, section_id: str, index: int) -> Day:
+        s = self._section_index(section_id)
         sections = list(self.sections)
-        sections[index] = replace(
-            sections[index], tasks=sections[index].tasks + (task,)
+        tasks = sections[s].tasks
+        sections[s] = replace(
+            sections[s], tasks=tasks[:index] + (task,) + tasks[index:]
         )
         return replace(self, sections=tuple(sections))
 

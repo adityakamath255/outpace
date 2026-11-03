@@ -12,7 +12,7 @@ from platformdirs import user_data_path
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.table import Table
 from rich.text import Text
-from textual import events, on
+from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -246,6 +246,13 @@ def stats(day: Day, now: datetime, width: int, full_title: str | None) -> Group:
     return Group(*spaced)
 
 
+class Deleted(NamedTuple):
+    """The row x last removed, which p and P put back as a copy."""
+
+    date: date
+    row: Task | Section
+
+
 class Change(NamedTuple):
     previous: Day
     description: str
@@ -270,16 +277,19 @@ HELP = (
         (
             ("j ↓", "next row"),
             ("k ↑", "previous row"),
+            ("} {", "next or previous section"),
+            ("^d ^u", "half a page down or up"),
             ("g", "first row"),
             ("G", "last row"),
-            ("⏎", "set points, toggle unscored, or rename section"),
+            ("⏎", "set points, or toggle an unscored task"),
             ("space", "toggle done"),
             ("+ -", "earned points up or down by one"),
-            ("a", "add tasks to the selected section"),
+            ("o", "add tasks below; on a section's rule, at its top"),
+            ("O", "add tasks above"),
+            ("#", "new section below this one"),
             ("e", "edit task, or rename section"),
-            ("o", "new untitled section below"),
-            ("r", "rename section; blank for untitled"),
-            ("dd del", "delete task, or section with its tasks"),
+            ("x del", "delete task, or section with its tasks"),
+            ("p P", "put the last deleted row below or above"),
             ("J K", "move down or up, across sections"),
             ("u", "undo, kept per day until you quit"),
         ),
@@ -289,7 +299,7 @@ HELP = (
         (
             ("[ ]", "previous or next day"),
             ("t", "today"),
-            ("^d", "open a date"),
+            ("T", "open a date"),
             ("c", "replace this list with another day's"),
             ("s", "edit schedule"),
         ),
@@ -302,7 +312,7 @@ HELP = (
             ("tab", "next field"),
         ),
     ),
-    ("App", (("?", "show this list"), ("q ^q", "quit"))),
+    ("App", (("?", "show this list"), ("q", "quit"))),
 )
 
 
@@ -312,24 +322,17 @@ class TaskList(OptionList):
         Binding("k", "cursor_up", "Up", show=False),
         Binding("g", "first", "First", show=False),
         Binding("G", "last", "Last", show=False),
+        Binding("ctrl+d", "half_page(1)", "Half page down", show=False),
+        Binding("ctrl+u", "half_page(-1)", "Half page up", show=False),
     ]
-    delete_pending = False
 
-    # dd deletes; Textual bindings cannot express chords, so any other key or
-    # leaving the list cancels a pending d
-    async def on_key(self, event: events.Key) -> None:
-        if event.key != "d":
-            self.delete_pending = False
+    def action_half_page(self, direction: int) -> None:
+        if self.highlighted is None:
             return
-        event.stop()
-        if self.delete_pending:
-            self.delete_pending = False
-            await self.run_action("app.delete")
-        else:
-            self.delete_pending = True
-
-    def on_blur(self) -> None:
-        self.delete_pending = False
+        # every row is one line, so a page of lines is a page of rows
+        step = max(self.scrollable_content_region.height // 2, 1)
+        target = self.highlighted + direction * step
+        self.highlighted = min(max(target, 0), self.option_count - 1)
 
 
 class VimScroll(VerticalScroll):
@@ -475,27 +478,30 @@ class TodoApp(App):
     TITLE = "todo"
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
-        Binding("a", "add", "Add"),
-        Binding("o", "new_section", "Section"),
+        Binding("o", "add(True)", "Add"),
+        Binding("O", "add(False)", "Add above", show=False),
+        Binding("#", "new_section", "Section"),
         Binding("e", "edit", "Edit"),
         Binding("space", "complete", "Done"),
         Binding("plus", "step(1)", "Points", key_display="+/-"),
         Binding("minus", "step(-1)", "Points down", show=False),
-        # TaskList handles the dd chord before bindings see d
-        Binding("delete", "delete", "Delete", key_display="dd"),
+        Binding("x", "delete", "Delete"),
+        Binding("delete", "delete", "Delete", show=False),
+        Binding("p", "put(True)", "Put", show=False),
+        Binding("P", "put(False)", "Put above", show=False),
         Binding("u", "undo", "Undo"),
         Binding("question_mark", "help", "Keys"),
-        Binding("r", "rename_section", "Rename section", show=False),
         Binding("c", "reuse", "Reuse", show=False),
         Binding("s", "schedule", "Schedule", show=False),
         Binding("J", "move(1)", "Move down", show=False),
         Binding("K", "move(-1)", "Move up", show=False),
-        Binding("ctrl+d", "choose_day", "Choose day", show=False),
+        Binding("}", "jump_section(1)", "Next section", show=False),
+        Binding("{", "jump_section(-1)", "Previous section", show=False),
+        Binding("T", "choose_day", "Choose day", show=False),
         Binding("[", "shift_day(-1)", "Previous day", show=False),
         Binding("]", "shift_day(1)", "Next day", show=False),
         Binding("t", "today", "Today", show=False),
         Binding("q", "quit", "Quit"),
-        Binding("ctrl+q", "quit", "Quit", show=False),
     ]
 
     def __init__(self, store: Store, list_date: date):
@@ -504,6 +510,7 @@ class TodoApp(App):
         # undo history per date, kept while the app runs; the store's lock
         # means nothing else changes a day behind it
         self.histories: dict[date, list[Change]] = {}
+        self.deleted: Deleted | None = None
         self.day = store.load(list_date)
 
     @property
@@ -528,7 +535,7 @@ class TodoApp(App):
                     id="columns",
                 )
                 yield TaskList(id="tasks")
-                yield Static("a  add tasks\nc  copy another day's list", id="empty")
+                yield Static("o  add tasks\nc  copy another day's list", id="empty")
             yield Static("", id="stats")
         yield Footer(compact=True)
 
@@ -637,10 +644,10 @@ class TodoApp(App):
 
     @on(OptionList.OptionSelected, "#tasks")
     def activate(self) -> None:
-        section, task = self.selected()
+        _, task = self.selected()
         if task is None:
-            self.rename_section(section)
-        elif task.available is None:
+            return
+        if task.available is None:
             self.action_complete()
         else:
             self.edit_points(task, task.available)
@@ -671,30 +678,53 @@ class TodoApp(App):
         subject: str | None = None,
         *,
         select: str | None = None,
-    ) -> None:
+    ) -> bool:
+        """Whether the day is saved, unchanged counting as saved."""
         try:
             self.save_change(day, description, subject, select=select)
         except RECOVERABLE as error:
             self.notify(str(error), title="Could not save", severity="error", timeout=8)
+            return False
+        return True
 
-    def action_add(self) -> None:
-        section = self.selected()[0]
-        self.push_screen(
-            TaskEditor(
-                None,
-                f"Add tasks to {section_label(section)}",
-                lambda task: self.save_change(
-                    self.day.add_task(task, section.id), f"added {task.title}", task.id
-                ),
+    def insertion_point(self, below: bool) -> tuple[Section, int]:
+        """Where a task goes relative to the selected row; a rule's section
+        starts just below it, so both directions give its top."""
+        section, task = self.selected()
+        if task is None:
+            return section, 0
+        return section, section.tasks.index(task) + below
+
+    def action_add(self, below: bool) -> None:
+        section, index = self.insertion_point(below)
+
+        def add(task: Task) -> None:
+            nonlocal index
+            self.save_change(
+                self.day.insert_task(task, section.id, index),
+                f"added {task.title}",
+                task.id,
             )
+            # each further task goes below the last, like lines typed after o
+            index += 1
+
+        self.push_screen(
+            TaskEditor(None, f"Add tasks to {section_label(section)}", add)
         )
 
     def action_new_section(self) -> None:
-        section = Section("")
-        self.save_or_notify(
-            self.day.insert_section(section, after=self.selected()[0].id),
-            f"added {section_label(section)}",
-            section.id,
+        index = self.day.sections.index(self.selected()[0]) + 1
+
+        def create(title: str) -> None:
+            section = Section(title)
+            self.save_change(
+                self.day.insert_section(section, index),
+                f"added {section_label(section)}",
+                section.id,
+            )
+
+        self.push_screen(
+            Prompt("New section", "", "⏎ add · esc cancel · blank for untitled", create)
         )
 
     def action_reuse(self) -> None:
@@ -728,9 +758,7 @@ class TodoApp(App):
 
     def action_edit(self) -> None:
         section, task = self.selected()
-        if task is None:
-            self.rename_section(section)
-        else:
+        if task is not None:
             self.push_screen(
                 TaskEditor(
                     task,
@@ -742,11 +770,8 @@ class TodoApp(App):
                     ),
                 )
             )
+            return
 
-    def action_rename_section(self) -> None:
-        self.rename_section(self.selected()[0])
-
-    def rename_section(self, section: Section) -> None:
         def rename(value: str) -> None:
             day = self.day.rename_section(section.id, value)
             renamed = next(s for s in day.sections if s.id == section.id)
@@ -815,16 +840,17 @@ class TodoApp(App):
         section, task = self.selected()
         if task is not None:
             # stay inside the section: landing on the next section's rule would
-            # make a repeated dd delete that whole section
+            # make a repeated x delete that whole section
             tasks = section.tasks
             index = tasks.index(task)
             neighbours = tasks[index + 1 : index + 2] or tasks[index - 1 : index]
-            self.save_or_notify(
+            if self.save_or_notify(
                 self.day.remove_task(task.id),
                 f"deleted {task.title}",
                 task.id,
                 select=neighbours[0].id if neighbours else section.id,
-            )
+            ):
+                self.deleted = Deleted(self.day.date, task)
             return
         count = len(section.tasks)
         tasks = f" and its {count} task{'s' if count != 1 else ''}" if count else ""
@@ -832,9 +858,27 @@ class TodoApp(App):
         verb = (
             "cleared" if len(removed.sections) == len(self.day.sections) else "deleted"
         )
-        self.save_or_notify(
+        if self.save_or_notify(
             removed, f"{verb} {section_label(section)}{tasks}", section.id
-        )
+        ):
+            self.deleted = Deleted(self.day.date, section)
+
+    def action_put(self, below: bool) -> None:
+        if self.deleted is None:
+            self.notify("Nothing deleted to put.", timeout=2)
+            return
+        # progress belongs to the day it was made on
+        keep_progress = self.deleted.date == self.day.date
+        row = self.deleted.row.duplicate(keep_progress=keep_progress)
+        if isinstance(row, Task):
+            section, index = self.insertion_point(below)
+            day = self.day.insert_task(row, section.id, index)
+            label = row.title
+        else:
+            index = self.day.sections.index(self.selected()[0]) + below
+            day = self.day.insert_section(row, index)
+            label = section_label(row)
+        self.save_or_notify(day, f"put {label}", row.id)
 
     def action_move(self, offset: Literal[-1, 1]) -> None:
         section, task = self.selected()
@@ -851,6 +895,22 @@ class TodoApp(App):
                 f"moved {section_label(section)} {direction}",
                 section.id,
             )
+
+    def action_jump_section(self, offset: Literal[-1, 1]) -> None:
+        """Vim's paragraph motions over rules: } to the next rule, or the last
+        row from the last section; { to this section's rule, or from a rule
+        to the one before."""
+        section, task = self.selected()
+        sections = self.day.sections
+        index = sections.index(section)
+        if offset < 0:
+            row = section.id if task else sections[max(index - 1, 0)].id
+        elif index + 1 < len(sections):
+            row = sections[index + 1].id
+        else:
+            row = section.tasks[-1].id if section.tasks else section.id
+        widget = self.query_one("#tasks", TaskList)
+        widget.highlighted = widget.get_option_index(row)
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
