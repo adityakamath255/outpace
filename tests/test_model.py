@@ -9,7 +9,6 @@ from todo.model import (
     Interval,
     Section,
     Task,
-    duration,
     empty_day,
     format_schedule,
     number,
@@ -119,7 +118,7 @@ def test_points_and_estimates_are_independent():
     edited = replace(task, minutes=10)
     assert edited.earned == task.earned
     assert score((edited, Task("Note", None, checked=True))) == (Fraction(3, 4), 4)
-    assert per_point(task.minutes * 60, task.available) == "10m"
+    assert per_point(task.minutes * 60, task.available) == 600
 
 
 def test_decimal_points_round_trip_without_display_loss():
@@ -177,7 +176,7 @@ def test_schedule_parser_accepts_short_clocks_and_whitespace():
 
 
 def test_schedule_continues_past_midnight_in_order():
-    text = "16:00-23:00, 23:30-00:30, 01:00-01:30"
+    text = "16:00 - 23:00, 23:30 - 00:30, 01:00 - 01:30"
     intervals = parse_schedule(text)
     assert intervals == (
         Interval(960, 1380),
@@ -194,7 +193,7 @@ def test_schedule_continues_past_midnight_in_order():
         ("07:30-bad", "24-hour time"),
         ("24:00-01:00", "24-hour time"),
         ("9:75-10:00", "24-hour time"),
-        ("07:30", "start-end"),
+        ("07:30", "start - end"),
         ("07:30-7:30", "identical"),
         # out of order, so the second interval would land on the next day
         ("07:30-11:00, 10:30-12:00", "24 hours"),
@@ -222,11 +221,10 @@ def test_report_matches_the_original_calculations():
         percentage(ratio(earned, available) - ratio(elapsed, total), signed=True)
         == "+9.52"
     )
-    assert duration(total) == "10h30m"
-    assert per_point(total, available) == "15m"
-    assert per_point(total - elapsed, available - earned) == "17m30s"
+    assert per_point(total, available) == 15 * 60
+    assert per_point(total - elapsed, available - earned) == 17 * 60 + 30
     assert percentage(ratio(0, 0)) == "n/a"
-    assert per_point(0, Fraction(0)) == "n/a"
+    assert per_point(0, Fraction(0)) is None
 
 
 def test_edit_move_remove_and_complete_preserve_task_identity():
@@ -259,18 +257,6 @@ def test_step_changes_earned_points_by_one_within_bounds():
     assert Task("Read", points("3")).step(-1).earned == 0
     assert Task("Remember", None).step(1).checked
     assert not Task("Remember", None, checked=True).step(-1).checked
-
-
-def test_durations_drop_zero_parts():
-    assert [duration(s) for s in (0, 59, 2400, 10800, 13200, 10799, 400)] == [
-        "0s",
-        "59s",
-        "40m",
-        "3h",
-        "3h40m",
-        "2h59m59s",
-        "6m40s",
-    ]
 
 
 def test_tasks_move_across_section_boundaries():

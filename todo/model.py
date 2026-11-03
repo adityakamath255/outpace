@@ -158,7 +158,7 @@ def _clock(text: str) -> int:
 
 
 def parse_schedule(text: str) -> tuple[Interval, ...]:
-    """Reads intervals written in order, like 07:30-11:00, 16:00-23:00.
+    """Reads intervals written in order, like 07:30 - 11:00, 16:00 - 23:00.
 
     The first starts on the list's day. Each later one starts at the first time
     with its clock reading at or after the previous end, so writing past
@@ -167,7 +167,7 @@ def parse_schedule(text: str) -> tuple[Interval, ...]:
     for part in filter(None, (part.strip() for part in text.split(","))):
         start_text, dash, end_text = part.partition("-")
         if not dash:
-            raise ValueError("Write each interval as start-end, like 07:30-11:00.")
+            raise ValueError("Write each interval as start - end, like 07:30 - 11:00.")
         start, end = _clock(start_text), _clock(end_text)
         if start == end:
             raise ValueError("An interval cannot have identical start and end times.")
@@ -184,7 +184,11 @@ def parse_schedule(text: str) -> tuple[Interval, ...]:
 
 
 def format_schedule(intervals: tuple[Interval, ...]) -> str:
-    return ", ".join(f"{clock(i.start)}-{clock(i.end)}" for i in intervals)
+    return ", ".join(interval_text(i) for i in intervals)
+
+
+def interval_text(interval: Interval) -> str:
+    return f"{clock(interval.start)} - {clock(interval.end)}"
 
 
 def parse_date(value: str) -> date:
@@ -392,12 +396,6 @@ def percentage(value: Fraction | None, *, signed: bool = False) -> str:
     return f"{sign}{whole}.{decimal:02d}"
 
 
-def duration(seconds: int) -> str:
-    parts = zip((seconds // 3600, seconds // 60 % 60, seconds % 60), "hms", strict=True)
-    return "".join(f"{value}{unit}" for value, unit in parts if value) or "0s"
-
-
-def per_point(seconds: int, available: Fraction) -> str:
-    if not available:
-        return "n/a"
-    return duration(int(Fraction(seconds) / available))
+def per_point(seconds: int, available: Fraction) -> int | None:
+    """Whole seconds per point, or None without points."""
+    return int(Fraction(seconds) / available) if available else None

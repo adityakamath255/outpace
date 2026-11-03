@@ -1,5 +1,4 @@
 import argparse
-import re
 import sqlite3
 from collections.abc import Callable
 from dataclasses import replace
@@ -12,7 +11,7 @@ from platformdirs import user_data_path
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.table import Table
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -33,9 +32,8 @@ from .model import (
     Interval,
     Section,
     Task,
-    clock,
-    duration,
     format_schedule,
+    interval_text,
     number,
     parse_date,
     parse_minutes,
@@ -59,16 +57,20 @@ BAR_WIDTH = 32
 MAX_MESSAGES = 5
 
 
-def units(value: str) -> Text:
-    """Dims the unit letters of durations like 3h40m so the digits stand out."""
+def duration(seconds: int) -> Text:
+    """Like 3h40m, with the unit letters dimmed so the digits stand out."""
+    parts = zip((seconds // 3600, seconds // 60 % 60, seconds % 60), "hms", strict=True)
     text = Text()
-    position = 0
-    for match in re.finditer(r"(?<=\d)[hms]", value):
-        text.append(value[position : match.start()])
-        text.append(match.group(), style="dim")
-        position = match.end()
-    text.append(value[position:])
-    return text
+    for value, unit in parts:
+        if value:
+            text.append(str(value))
+            text.append(unit, style="dim")
+    return text if text.plain else Text.assemble("0", ("s", "dim"))
+
+
+def pace(seconds: int, available: Fraction) -> Text:
+    value = per_point(seconds, available)
+    return Text("n/a") if value is None else duration(value)
 
 
 def row(cells: tuple[Text | str, ...], title: Text | str) -> Table:
@@ -92,12 +94,114 @@ def task_row(task: Task) -> Table:
         Text(marker, style=color),
         Text(number(task.earned) if scored else "", style=color),
         number(task.available) if task.available is not None else "",
-        units(duration(task.minutes * 60)) if task.minutes else "",
-        units(per_point(task.minutes * 60, task.available))
+        duration(task.minutes * 60) if task.minutes else "",
+        pace(task.minutes * 60, task.available)
         if task.minutes and task.available is not None
         else "",
     )
     return row(cells, Text(task.title))
+
+
+def completion(task: Task) -> Fraction:
+    if task.available is None:
+        return Fraction(task.checked)
+    return task.earned / task.available
+
+
+def time_per_point(task: Task) -> Fraction | None:
+    if task.minutes is None or task.available is None:
+        return None
+    return task.minutes / task.available
+
+
+class Column(NamedTuple):
+    """A sortable column of the task list."""
+
+    header: str
+    # None marks a task without the value; such tasks sort last
+    value: Callable[[Task], Fraction | int | None]
+    # the direction a first click gives and the menu lists first
+    descending: bool
+    # how the menu names each direction: ascending, then descending
+    words: tuple[str, str]
+
+
+COLUMNS = (
+    Column("done", completion, False, ("least done first", "most done first")),
+    Column(
+        "pts",
+        lambda task: task.available,
+        True,
+        ("fewest points first", "most points first"),
+    ),
+    Column(
+        "est",
+        lambda task: task.minutes,
+        False,
+        ("shortest estimate first", "longest estimate first"),
+    ),
+    Column(
+        "t/pt",
+        time_per_point,
+        False,
+        ("least time per point first", "most time per point first"),
+    ),
+)
+
+
+class Sort(NamedTuple):
+    column: Column
+    descending: bool
+
+    @property
+    def words(self) -> str:
+        return self.column.words[self.descending]
+
+
+def arrange(tasks: tuple[Task, ...], sort: Sort | None) -> tuple[Task, ...]:
+    """Tasks in display order; a sort is stable, so ties keep stored order."""
+    if sort is None:
+        return tasks
+    keyed: list[tuple[Fraction | int, Task]] = []
+    missing: list[Task] = []
+    for task in tasks:
+        value = sort.column.value(task)
+        if value is None:
+            missing.append(task)
+        else:
+            keyed.append((value, task))
+    keyed.sort(key=lambda pair: pair[0], reverse=sort.descending)
+    return tuple(task for _, task in keyed) + tuple(missing)
+
+
+def next_sort(current: Sort | None, column: Column) -> Sort | None:
+    """Clicking a column: its natural direction, then the reverse, then off."""
+    if current is None or current.column is not column:
+        return Sort(column, column.descending)
+    if current.descending == column.descending:
+        return Sort(column, not column.descending)
+    return None
+
+
+def column_at(x: int) -> Column | None:
+    """The sortable column at x cells into a row, matching row's grid."""
+    start = 0
+    for width, column in zip(CELL_WIDTHS, (None, *COLUMNS), strict=True):
+        if start <= x < start + width:
+            return column
+        start += width + 1
+    return None
+
+
+def header_row(sort: Sort | None) -> Table:
+    cells: list[Text | str] = [""]
+    for column in COLUMNS:
+        if sort is not None and sort.column is column:
+            arrow = "↓" if sort.descending else "↑"
+            cells.append(Text(column.header + arrow, style="bold"))
+        else:
+            cells.append(Text(column.header, style="dim"))
+    return row(tuple(cells), "")
 
 
 def section_label(section: Section) -> str:
@@ -180,7 +284,7 @@ def schedule_blocks(
     now_seconds = seconds_into(day.date, now)
     elapsed, total = time_progress(day.intervals, now_seconds)
     progress, time_ratio = ratio(earned, available), ratio(elapsed, total)
-    value = units(duration(elapsed)) + Text(" / ") + units(duration(total))
+    value = duration(elapsed) + Text(" / ") + duration(total)
     status = Text()
     if progress is not None and time_ratio is not None:
         difference = progress - time_ratio
@@ -198,20 +302,46 @@ def schedule_blocks(
     elif elapsed == total:
         remaining = Text("ended")
     else:
-        remaining = units(per_point(total - elapsed, available - earned))
-    pace = Table.grid(padding=(0, 2))
-    pace.add_column(style="dim", no_wrap=True)
-    pace.add_column(no_wrap=True)
-    pace.add_row("time / point", units(per_point(total, available)))
-    pace.add_row("remaining / point", remaining)
-    intervals = Text()
+        remaining = pace(total - elapsed, available - earned)
+    rates = Table.grid(padding=(0, 2))
+    rates.add_column(style="dim", no_wrap=True)
+    rates.add_column(no_wrap=True)
+    rates.add_row("time / pt", pace(total, available))
+    rates.add_row("left / pt", remaining)
+    return [meter("time", value, time_ratio, "cyan", width), status, rates]
+
+
+def plan(day: Day, tasks: list[Task]) -> Group:
+    """The schedule against the estimates: how much time the plan leaves."""
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="dim", no_wrap=True)
+    grid.add_column()
     for index, interval in enumerate(day.intervals):
-        if index:
-            intervals.append("  ")
-        intervals.append(f"{clock(interval.start)}-{clock(interval.end)}")
+        text = Text(interval_text(interval))
         if interval.start >= DAY_MINUTES:
-            intervals.append(" next day", style="dim")
-    return [meter("time", value, time_ratio, "cyan", width), status, pace, intervals]
+            text.append(" next day", style="dim")
+        grid.add_row("schedule" if index == 0 else "", text)
+    if not day.intervals:
+        grid.add_row("schedule", Text("not set (s)", style="dim"))
+    estimates = [task.minutes for task in tasks if task.minutes is not None]
+    blocks: list[RenderableType] = [grid]
+    if estimates:
+        estimated = sum(estimates) * 60
+        grid.add_row("estimated", duration(estimated))
+        scheduled = sum(interval.seconds for interval in day.intervals)
+        # the word carries the meaning; colour only backs it up
+        if scheduled and estimated <= scheduled:
+            grid.add_row(Text("spare", style="blue"), duration(scheduled - estimated))
+        elif scheduled:
+            over = duration(estimated - scheduled)
+            over.stylize("yellow")
+            grid.add_row(Text("over", style="bold yellow"), over)
+        missing = sum(
+            task.minutes is None and task.available is not None for task in tasks
+        )
+        if missing:
+            blocks.append(Text(f"{missing} scored without an estimate", style="dim"))
+    return Group(*blocks)
 
 
 def stats(day: Day, now: datetime, width: int, full_title: str | None) -> Group:
@@ -224,18 +354,7 @@ def stats(day: Day, now: datetime, width: int, full_title: str | None) -> Group:
     ]
     if day.intervals:
         blocks += schedule_blocks(day, now, earned, available, width)
-    else:
-        blocks.append(Text("no schedule · s to set one", style="dim"))
-    estimates = [task.minutes for task in tasks if task.minutes is not None]
-    if estimates:
-        text = units(duration(sum(estimates) * 60))
-        text.append(f" estimated across {len(estimates)} tasks")
-        missing = sum(
-            task.minutes is None and task.available is not None for task in tasks
-        )
-        if missing:
-            text.append(f"\n{missing} scored without an estimate", style="dim")
-        blocks.append(text)
+    blocks.append(plan(day, tasks))
     if full_title is not None:
         blocks.append(Text(full_title, style="bold"))
     spaced: list[RenderableType] = []
@@ -254,9 +373,10 @@ class Deleted(NamedTuple):
 
 
 class Change(NamedTuple):
-    previous: Day
+    # the day undoing returns to, or on a redo stack the day redoing does
+    restores: Day
     description: str
-    # the row to select after undoing: a task or section id
+    # the row to select afterwards: a task or section id
     subject: str | None
 
 
@@ -291,7 +411,9 @@ HELP = (
             ("x del", "delete task, or section with its tasks"),
             ("p P", "put the last deleted row below or above"),
             ("J K", "move down or up, across sections"),
+            ("S", "sort tasks across sections; or click a column name"),
             ("u", "undo, kept per day until you quit"),
+            ("^r", "redo; any new change clears it"),
         ),
     ),
     (
@@ -316,7 +438,7 @@ HELP = (
 )
 
 
-class TaskList(OptionList):
+class VimList(OptionList):
     BINDINGS = [
         Binding("j", "cursor_down", "Down", show=False),
         Binding("k", "cursor_up", "Up", show=False),
@@ -354,12 +476,18 @@ class Form(ModalScreen):
     def save(self) -> None:
         raise NotImplementedError
 
+    def show(self, selector: str, message: str) -> None:
+        """Shows a message line, which takes no room while empty."""
+        line = self.query_one(selector, Static)
+        line.update(message)
+        line.display = bool(message)
+
     @on(Input.Submitted)
     def action_save(self) -> None:
         try:
             self.save()
         except RECOVERABLE as error:
-            self.query_one("#error", Static).update(str(error))
+            self.show("#error", str(error))
 
 
 class Prompt(Form):
@@ -380,7 +508,7 @@ class Prompt(Form):
             yield Label(self.title_text, classes="dialog-title", markup=False)
             yield Input(self.value, compact=True)
             yield Static("", id="error", markup=False)
-            yield Static(self.hint, classes="muted", markup=False)
+            yield Static(self.hint, classes="muted hint", markup=False)
 
     def save(self) -> None:
         self.on_submit(self.query_one(Input).value)
@@ -434,7 +562,7 @@ class TaskEditor(Form):
             yield Static("", id="error", markup=False)
             # the list is hidden behind the dialog, so confirm each added task
             yield Static("", id="added", classes="muted", markup=False)
-            yield Static(hint, classes="muted", markup=False)
+            yield Static(hint, classes="muted hint", markup=False)
 
     def save(self) -> None:
         available_text = self.query_one("#available", Input).value.strip()
@@ -449,9 +577,42 @@ class TaskEditor(Form):
         self.on_submit(task)
         for field in self.query(Input):
             field.value = ""
-        self.query_one("#error", Static).update("")
-        self.query_one("#added", Static).update(f"added {task.title}")
+        self.show("#error", "")
+        self.show("#added", f"added {task.title}")
         self.query_one("#available", Input).focus()
+
+
+class SortMenu(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+
+    def __init__(self, current: Sort | None, on_choose: Callable[[Sort | None], None]):
+        super().__init__()
+        self.current = current
+        self.on_choose = on_choose
+        self.choices: list[Sort | None] = [None]
+        for column in COLUMNS:
+            self.choices += [
+                Sort(column, column.descending),
+                Sort(column, not column.descending),
+            ]
+
+    def compose(self) -> ComposeResult:
+        options = []
+        for choice in self.choices:
+            mark = "✓ " if choice == self.current else "  "
+            options.append(Option(mark + (choice.words if choice else "stored order")))
+        with Vertical(classes="dialog", id="sort-dialog"):
+            yield Label("Sort tasks across sections", classes="dialog-title")
+            yield VimList(*options, id="sort-options")
+            yield Static("⏎ sort · esc cancel", classes="muted hint", markup=False)
+
+    def on_mount(self) -> None:
+        self.query_one(VimList).highlighted = self.choices.index(self.current)
+
+    @on(OptionList.OptionSelected)
+    def choose(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss()
+        self.on_choose(self.choices[event.option_index])
 
 
 class HelpScreen(ModalScreen):
@@ -490,9 +651,11 @@ class TodoApp(App):
         Binding("p", "put(True)", "Put", show=False),
         Binding("P", "put(False)", "Put above", show=False),
         Binding("u", "undo", "Undo"),
+        Binding("ctrl+r", "redo", "Redo", show=False),
         Binding("question_mark", "help", "Keys"),
         Binding("c", "reuse", "Reuse", show=False),
         Binding("s", "schedule", "Schedule", show=False),
+        Binding("S", "sort", "Sort", show=False),
         Binding("J", "move(1)", "Move down", show=False),
         Binding("K", "move(-1)", "Move up", show=False),
         Binding("}", "jump_section(1)", "Next section", show=False),
@@ -507,10 +670,13 @@ class TodoApp(App):
     def __init__(self, store: Store, list_date: date):
         super().__init__(ansi_color=True)
         self.store = store
-        # undo history per date, kept while the app runs; the store's lock
-        # means nothing else changes a day behind it
+        # undo and redo stacks per date, kept while the app runs; the store's
+        # lock means nothing else changes a day behind them
         self.histories: dict[date, list[Change]] = {}
+        self.redos: dict[date, list[Change]] = {}
         self.deleted: Deleted | None = None
+        # a view of every day until quit, never stored
+        self.sort: Sort | None = None
         self.day = store.load(list_date)
 
     @property
@@ -530,11 +696,8 @@ class TodoApp(App):
         yield Static("", id="date")
         with Horizontal(id="body"):
             with Vertical(id="task-pane"):
-                yield Static(
-                    row(tuple(map(Text, ("", "done", "pts", "est", "t/pt"))), ""),
-                    id="columns",
-                )
-                yield TaskList(id="tasks")
+                yield Static(header_row(None), id="columns")
+                yield VimList(id="tasks")
                 yield Static("o  add tasks\nc  copy another day's list", id="empty")
             yield Static("", id="stats")
         yield Footer(compact=True)
@@ -543,7 +706,7 @@ class TodoApp(App):
         self.theme = "ansi-dark"
         self.redraw(self.first_row())
         self.set_interval(1, self.refresh_stats)
-        self.query_one("#tasks", TaskList).focus()
+        self.query_one("#tasks", VimList).focus()
 
     def action_choose_day(self) -> None:
         self.push_screen(
@@ -584,7 +747,7 @@ class TodoApp(App):
 
         A day always has a section and redraw always highlights a row, so a
         missing row is a bug rather than a state to handle."""
-        option = self.query_one("#tasks", TaskList).highlighted_option
+        option = self.query_one("#tasks", VimList).highlighted_option
         if option is not None:
             for section in self.day.sections:
                 if option.id == section.id:
@@ -596,19 +759,45 @@ class TodoApp(App):
 
     def first_row(self) -> str:
         """Where a freshly opened day starts: its first task, else its first rule."""
+        ordered = self.sorted_tasks()
+        if ordered:
+            return ordered[0].id
         return next((task.id for _, task in self.day.tasks()), self.day.sections[0].id)
 
+    def sorted_tasks(self) -> tuple[Task, ...] | None:
+        """Every task in sorted order, or None while the list shows sections:
+        unsorted, or sorted without tasks, which would leave no row."""
+        tasks = tuple(task for _, task in self.day.tasks())
+        if self.sort is None or not tasks:
+            return None
+        return arrange(tasks, self.sort)
+
+    def refuse_while_sorted(self, action: str) -> bool:
+        """Says so when the sorted list hides the order or sections an action
+        works on."""
+        if self.sort is None or not any(self.day.tasks()):
+            return False
+        self.notify(
+            f"Sorted by {self.sort.words}; choose stored order with S to {action}.",
+            timeout=4,
+        )
+        return True
+
     def redraw(self, selection: str | None = None) -> None:
-        widget = self.query_one("#tasks", TaskList)
+        widget = self.query_one("#tasks", VimList)
         old = widget.highlighted_option
         selection = selection or (old.id if old else None)
         old_index = widget.highlighted
         _, total = score(task for _, task in self.day.tasks())
-        options = []
-        for section in self.day.sections:
-            # section and task ids are unique across both kinds (see Day)
-            options.append(Option(SectionRule(section, total), id=section.id))
-            options.extend(Option(task_row(task), id=task.id) for task in section.tasks)
+        ordered = self.sorted_tasks()
+        if ordered is not None:
+            options = [Option(task_row(task), id=task.id) for task in ordered]
+        else:
+            options = []
+            for section in self.day.sections:
+                # section and task ids are unique across both kinds (see Day)
+                options.append(Option(SectionRule(section, total), id=section.id))
+                options.extend(Option(task_row(t), id=t.id) for t in section.tasks)
         widget.clear_options().add_options(options)
         ids = [option.id for option in options]
         if selection in ids:
@@ -617,6 +806,7 @@ class TodoApp(App):
             # the selected row is gone, so keep the cursor where it was
             widget.highlighted = min(old_index or 0, len(ids) - 1)
         self.query_one("#empty", Static).display = not any(self.day.tasks())
+        self.query_one("#columns", Static).update(header_row(self.sort))
         self.query_one("#date", Static).update(
             Text(f"{self.day.date:%a} {self.day.date.isoformat()}", style="bold")
         )
@@ -628,7 +818,7 @@ class TodoApp(App):
         full_title = None
         _, task = self.selected()
         if task is not None:
-            tasks = self.query_one("#tasks", TaskList)
+            tasks = self.query_one("#tasks", VimList)
             # option padding takes one column on each side
             width = tasks.scrollable_content_region.width - 2 - FIXED_WIDTH
             if Text(task.title).cell_len > width:
@@ -668,6 +858,7 @@ class TodoApp(App):
         self.histories.setdefault(day.date, []).append(
             Change(self.day, description, subject)
         )
+        self.redos.pop(day.date, None)
         self.day = day
         self.redraw(select or subject)
 
@@ -696,6 +887,8 @@ class TodoApp(App):
         return section, section.tasks.index(task) + below
 
     def action_add(self, below: bool) -> None:
+        if self.refuse_while_sorted("add tasks"):
+            return
         section, index = self.insertion_point(below)
 
         def add(task: Task) -> None:
@@ -713,6 +906,8 @@ class TodoApp(App):
         )
 
     def action_new_section(self) -> None:
+        if self.refuse_while_sorted("add sections"):
+            return
         index = self.day.sections.index(self.selected()[0]) + 1
 
         def create(title: str) -> None:
@@ -812,7 +1007,7 @@ class TodoApp(App):
                 "Schedule",
                 format_schedule(self.day.intervals),
                 "⏎ save · esc cancel · 24-hour times in order, like "
-                "07:30-11:00, 16:00-23:00; past midnight continues into the "
+                "07:30 - 11:00, 16:00 - 23:00; past midnight continues into the "
                 "next day; blank clears",
                 lambda value: self.save_change(
                     replace(self.day, intervals=parse_schedule(value)),
@@ -839,9 +1034,10 @@ class TodoApp(App):
     def action_delete(self) -> None:
         section, task = self.selected()
         if task is not None:
-            # stay inside the section: landing on the next section's rule would
-            # make a repeated x delete that whole section
-            tasks = section.tasks
+            # sorted, any neighbour will do; otherwise stay inside the section,
+            # since landing on the next section's rule would make a repeated x
+            # delete that whole section
+            tasks = self.sorted_tasks() or section.tasks
             index = tasks.index(task)
             neighbours = tasks[index + 1 : index + 2] or tasks[index - 1 : index]
             if self.save_or_notify(
@@ -864,23 +1060,27 @@ class TodoApp(App):
             self.deleted = Deleted(self.day.date, section)
 
     def action_put(self, below: bool) -> None:
+        if self.refuse_while_sorted("put rows back"):
+            return
         if self.deleted is None:
             self.notify("Nothing deleted to put.", timeout=2)
             return
         # progress belongs to the day it was made on
         keep_progress = self.deleted.date == self.day.date
-        row = self.deleted.row.duplicate(keep_progress=keep_progress)
-        if isinstance(row, Task):
+        copied = self.deleted.row.duplicate(keep_progress=keep_progress)
+        if isinstance(copied, Task):
             section, index = self.insertion_point(below)
-            day = self.day.insert_task(row, section.id, index)
-            label = row.title
+            day = self.day.insert_task(copied, section.id, index)
+            label = copied.title
         else:
             index = self.day.sections.index(self.selected()[0]) + below
-            day = self.day.insert_section(row, index)
-            label = section_label(row)
-        self.save_or_notify(day, f"put {label}", row.id)
+            day = self.day.insert_section(copied, index)
+            label = section_label(copied)
+        self.save_or_notify(day, f"put {label}", copied.id)
 
     def action_move(self, offset: Literal[-1, 1]) -> None:
+        if self.refuse_while_sorted("move tasks"):
+            return
         section, task = self.selected()
         direction = "down" if offset > 0 else "up"
         if task is not None:
@@ -900,36 +1100,68 @@ class TodoApp(App):
         """Vim's paragraph motions over rules: } to the next rule, or the last
         row from the last section; { to this section's rule, or from a rule
         to the one before."""
+        if self.refuse_while_sorted("jump between sections"):
+            return
         section, task = self.selected()
         sections = self.day.sections
         index = sections.index(section)
         if offset < 0:
-            row = section.id if task else sections[max(index - 1, 0)].id
+            target = section.id if task else sections[max(index - 1, 0)].id
         elif index + 1 < len(sections):
-            row = sections[index + 1].id
+            target = sections[index + 1].id
         else:
-            row = section.tasks[-1].id if section.tasks else section.id
-        widget = self.query_one("#tasks", TaskList)
-        widget.highlighted = widget.get_option_index(row)
+            target = section.tasks[-1].id if section.tasks else section.id
+        widget = self.query_one("#tasks", VimList)
+        widget.highlighted = widget.get_option_index(target)
+
+    def action_sort(self) -> None:
+        self.push_screen(SortMenu(self.sort, self.set_sort))
+
+    def set_sort(self, sort: Sort | None) -> None:
+        self.sort = sort
+        self.redraw()
+
+    @on(events.Click, "#columns")
+    def sort_by_column(self, event: events.Click) -> None:
+        offset = event.get_content_offset(self.query_one("#columns"))
+        column = column_at(offset.x) if offset else None
+        if column is not None:
+            self.set_sort(next_sort(self.sort, column))
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
 
     def action_undo(self) -> None:
-        history = self.histories.get(self.day.date)
-        if not history:
-            self.notify("Nothing to undo.", timeout=2)
+        self.restore(self.histories, self.redos, "undo", "Undid")
+
+    def action_redo(self) -> None:
+        self.restore(self.redos, self.histories, "redo", "Redid")
+
+    def restore(
+        self,
+        source: dict[date, list[Change]],
+        target: dict[date, list[Change]],
+        verb: str,
+        past: str,
+    ) -> None:
+        """Return to the day on top of source, recording the way back on target."""
+        stack = source.get(self.day.date)
+        if not stack:
+            self.notify(f"Nothing to {verb}.", timeout=2)
             return
-        change = history[-1]
+        change = stack[-1]
         try:
-            self.store.save(change.previous)
+            self.store.save(change.restores)
         except RECOVERABLE as error:
-            self.notify(str(error), title="Could not undo", severity="error", timeout=8)
+            self.notify(
+                str(error), title=f"Could not {verb}", severity="error", timeout=8
+            )
             return
-        history.pop()
-        self.day = change.previous
+        stack.pop()
+        target.setdefault(self.day.date, []).append(change._replace(restores=self.day))
+        self.day = change.restores
         self.redraw(change.subject)
-        self.notify(f"Undid: {change.description}", timeout=4, markup=False)
+        self.notify(f"{past}: {change.description}", timeout=4, markup=False)
 
 
 def main() -> None:

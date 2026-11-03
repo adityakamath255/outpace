@@ -22,40 +22,40 @@ Screen {
     height: 1;
     /* option padding plus the scrollbar gutter, so headers sit over their values */
     padding: 0 2 0 1;
-    text-style: dim;
 }
 
-#tasks {
+VimList {
     height: auto;
     max-height: 100%;
     border: none;
     background: ansi_default;
     padding: 0;
-    scrollbar-size: 1 1;
+    /* titles truncate, so a list never scrolls sideways */
+    scrollbar-size: 0 1;
     scrollbar-gutter: stable;
     scrollbar-background: ansi_default;
     scrollbar-color: ansi_black;
 }
 
-#tasks:focus {
+VimList:focus {
     border: none;
 }
 
-#tasks > .option-list--option {
+VimList > .option-list--option {
     padding: 0 1;
 }
 
-#tasks > .option-list--option-highlighted {
+VimList > .option-list--option-highlighted {
     background: ansi_black;
     color: ansi_default;
     text-style: none;
 }
 
-#tasks:focus > .option-list--option-highlighted {
+VimList:focus > .option-list--option-highlighted {
     text-style: bold;
 }
 
-#tasks > .option-list--option-hover {
+VimList > .option-list--option-hover {
     background: ansi_black;
 }
 
@@ -130,9 +130,19 @@ ModalScreen {
     text-style: dim;
 }
 
-#error {
+/* message lines appear only with a message, each set off by a blank row */
+#error, #added {
+    display: none;
     height: auto;
+    margin-top: 1;
+}
+
+#error {
     color: ansi_red;
+}
+
+.hint {
+    margin-top: 1;
 }
 
 Toast {
@@ -142,6 +152,10 @@ Toast {
     padding: 0 1;
     text-wrap: nowrap;
     text-overflow: ellipsis;
+}
+
+#sort-dialog {
+    width: 40;
 }
 
 #task-dialog {

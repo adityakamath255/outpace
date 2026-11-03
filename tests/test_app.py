@@ -9,7 +9,15 @@ from rich.console import Console
 from textual.screen import ModalScreen
 from textual.widgets import Footer, Input, Static
 
-from todo.app import SectionRule, TodoApp, schedule_status
+from todo.app import (
+    COLUMNS,
+    SectionRule,
+    Sort,
+    TodoApp,
+    arrange,
+    duration,
+    schedule_status,
+)
 from todo.db import Store
 from todo.model import Interval, Section, Task, empty_day, parse_schedule, points
 
@@ -27,6 +35,11 @@ async def add_task(pilot, title):
     await pilot.press("o")
     pilot.app.screen.query_one("#title", Input).value = title
     await pilot.press("enter", "escape")
+
+
+def line_of(text, label):
+    """The stats row a grid label starts; labels are padded by two spaces."""
+    return next(row for row in text.splitlines() if row.startswith(f"{label}  "))
 
 
 def footer_action(app, action):
@@ -181,20 +194,6 @@ def test_reuse_copies_a_saved_day_and_undo_restores_the_destination(app, existin
     asyncio.run(reuse_day())
 
 
-def test_total_estimate_uses_hours_and_minutes(app):
-    section, _ = next(app.day.tasks())
-
-    async def read_estimate():
-        async with app.run_test():
-            app.save_change(
-                app.day.insert_task(Task("Read", None, minutes=190), section.id, 0),
-                "added Read",
-            )
-            assert "3h40m estimated across 2 tasks" in stats_text(app)
-
-    asyncio.run(read_estimate())
-
-
 def test_failed_save_keeps_form_and_does_not_change_history(app, monkeypatch):
     original = app.day
 
@@ -302,10 +301,10 @@ def test_plus_and_minus_step_points_and_undo_names_the_change(app, monkeypatch):
 
 
 def test_help_lists_every_key_binding(app):
-    from todo.app import HELP, TaskList
+    from todo.app import HELP, VimList
 
     documented = {key for _, rows in HELP for keys, _ in rows for key in keys.split()}
-    bindings = [*TodoApp.BINDINGS, *TaskList.BINDINGS]
+    bindings = [*TodoApp.BINDINGS, *VimList.BINDINGS]
     displays = {
         app.get_key_display(binding.with_key(key))
         for binding in bindings
@@ -339,7 +338,7 @@ def test_ended_schedule_is_explained_instead_of_showing_zero_remaining(
         async with app.run_test():
             stats = stats_text(app)
             assert "schedule ended" in stats
-            assert "remaining / point  ended" in stats
+            assert "left / pt  ended" in stats
 
     asyncio.run(check_ended_schedule())
 
@@ -491,7 +490,7 @@ def test_schedule_edit_saves_recalculates_and_undoes(app):
         async with app.run_test(size=(110, 45)) as pilot:
             await pilot.press("s")
             field = app.screen.query_one(Input)
-            assert field.value == "07:30-11:00, 16:00-23:00"
+            assert field.value == "07:30 - 11:00, 16:00 - 23:00"
             field.value = "09:00-12:00, 23:00-01:00, 01:30-02:00"
             await pilot.press("enter")
             assert app.day.intervals == (
@@ -514,7 +513,7 @@ def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.press("s", "ctrl+u", "enter")
             assert app.day.intervals == ()
-            assert "no schedule" in stats_text(app)
+            assert "not set" in stats_text(app)
             assert app.store.load(app.day.date) == app.day
             await pilot.press("s", *"08:00-09:00", "enter")
             assert app.day.intervals == (Interval(8 * 60, 9 * 60),)
@@ -678,3 +677,107 @@ def test_ctrl_d_and_ctrl_u_move_half_a_page(app):
             assert widget.highlighted == widget.option_count - 1
 
     asyncio.run(scroll())
+
+
+def test_durations_drop_zero_parts():
+    seconds = (0, 59, 2400, 10800, 13200, 10799, 400, 37800)
+    assert [duration(s).plain for s in seconds] == [
+        "0s",
+        "59s",
+        "40m",
+        "3h",
+        "3h40m",
+        "2h59m59s",
+        "6m40s",
+        "10h30m",
+    ]
+
+
+def test_redo_reapplies_undone_changes_until_a_new_change(app, monkeypatch):
+    messages = []
+    monkeypatch.setattr(
+        app, "notify", lambda message, **kwargs: messages.append(message)
+    )
+
+    async def undo_and_redo():
+        async with app.run_test() as pilot:
+            await pilot.press("plus", "plus")
+            changed = app.day
+            await pilot.press("u", "u", "ctrl+r", "ctrl+r")
+            assert app.day == changed
+            assert app.store.load(changed.date) == changed
+            assert messages == [
+                "Undid: changed Practice from 3/5 to 4/5",
+                "Undid: changed Practice from 2/5 to 3/5",
+                "Redid: changed Practice from 2/5 to 3/5",
+                "Redid: changed Practice from 3/5 to 4/5",
+            ]
+            await pilot.press("u", "minus", "ctrl+r")
+            assert messages[-1] == "Nothing to redo."
+            assert app.selected()[1].earned == 2
+
+    asyncio.run(undo_and_redo())
+
+
+def test_sorting_puts_missing_values_last_and_keeps_ties_in_stored_order():
+    pts, est = COLUMNS[1], COLUMNS[2]
+    a, b = Task("a", points("2"), minutes=30), Task("b", points("2"), minutes=10)
+    c, d = Task("c", None, minutes=10), Task("d", None)
+    tasks = (a, b, c, d)
+    assert arrange(tasks, None) == tasks
+    assert arrange(tasks, Sort(est, False)) == (b, c, a, d)
+    assert arrange(tasks, Sort(est, True)) == (a, b, c, d)
+    assert arrange(tasks, Sort(pts, True)) == (a, b, c, d)
+
+
+def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
+    a, b = Task("a", points("1"), minutes=60), Task("b", points("4"), minutes=20)
+    c = Task("c", None)
+    first, second = Section("A", (a,)), Section("B", (b, c))
+    day = replace(app.day, sections=(first, second))
+    app.store.save(day)
+    app = TodoApp(app.store, day.date)
+
+    def shown():
+        return [option.id for option in app.query_one("#tasks").options]
+
+    async def sort():
+        async with app.run_test(size=(110, 45)) as pilot:
+            # the menu lists stored order, then each column both ways
+            await pilot.press("S", *"jjjjj", "enter")
+            assert shown() == [b.id, a.id, c.id]
+            # what works on stored order or sections is refused while sorted
+            await pilot.press("J", "}", "number_sign", "o", "O", "p")
+            assert app.day == day
+            assert not isinstance(app.screen, ModalScreen)
+            # clicks on pts: most first, then fewest first, then stored order
+            pts = 1 + 2 + 7
+            assert await pilot.click("#columns", offset=(pts, 0))
+            assert shown() == [b.id, a.id, c.id]
+            assert await pilot.click("#columns", offset=(pts, 0))
+            assert shown() == [a.id, b.id, c.id]
+            assert await pilot.click("#columns", offset=(pts, 0))
+            assert shown() == [first.id, a.id, second.id, b.id, c.id]
+            assert app.store.load(day.date) == day
+
+    asyncio.run(sort())
+
+
+def test_plan_shows_spare_or_over_scheduled_time(app):
+    section = app.day.sections[0]
+
+    def line(label):
+        return line_of(stats_text(app), label)
+
+    async def plan():
+        async with app.run_test():
+            assert "07:30 - 11:00" in line("schedule")
+            assert "30m" in line("estimated")
+            assert "10h" in line("spare")
+            app.save_change(
+                app.day.insert_task(Task("Long", None, minutes=660), section.id, 0),
+                "added Long",
+            )
+            assert "1h" in line("over")
+
+    asyncio.run(plan())
