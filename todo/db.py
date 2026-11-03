@@ -1,12 +1,10 @@
 import json
 import sqlite3
-from collections.abc import Iterator
-from contextlib import closing, contextmanager
 from datetime import date
 from fractions import Fraction
 from pathlib import Path
 
-from .model import Day, Interval, Section, Task
+from .model import Day, Interval, Section, Task, empty_day
 
 VERSION = 2
 
@@ -68,78 +66,69 @@ def decode(list_date: date, text: str) -> Day:
     )
 
 
-class Conflict(ValueError):
-    """The stored day is not the one the caller expected."""
-
-
 class Store:
-    """One JSON document per day, keyed by its ISO date."""
+    """One JSON document per day, keyed by its ISO date.
+
+    The store holds the database exclusively until closed, so no other session
+    can change a day underneath this one. A blank day is never stored, so a
+    blank day and a missing one are the same."""
 
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        with self.transaction() as connection:
-            version = connection.execute("PRAGMA user_version").fetchone()[0]
-            if version == 0:
-                connection.execute(
-                    "CREATE TABLE days (date TEXT PRIMARY KEY, data TEXT NOT NULL)"
-                )
-            elif version != VERSION:
-                raise ValueError(
-                    f"Unsupported database version {version}; expected {VERSION}."
-                )
-            connection.execute(f"PRAGMA user_version = {VERSION}")
+        self.connection = sqlite3.connect(path, timeout=0)
+        try:
+            # exclusive locking mode keeps the lock from the first transaction
+            # until the connection closes
+            self.connection.execute("PRAGMA locking_mode = EXCLUSIVE")
+            try:
+                self.connection.execute("BEGIN EXCLUSIVE")
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode == sqlite3.SQLITE_BUSY:
+                    raise ValueError(
+                        "The database is open in another todo session."
+                    ) from error
+                raise
+            with self.connection:
+                version = self.connection.execute("PRAGMA user_version").fetchone()[0]
+                if version == 0:
+                    self.connection.execute(
+                        "CREATE TABLE days (date TEXT PRIMARY KEY, data TEXT NOT NULL)"
+                    )
+                elif version != VERSION:
+                    raise ValueError(
+                        f"Unsupported database version {version}; expected {VERSION}."
+                    )
+                self.connection.execute(f"PRAGMA user_version = {VERSION}")
+        except BaseException:
+            self.connection.close()
+            raise
 
-    @contextmanager
-    def transaction(self) -> Iterator[sqlite3.Connection]:
-        """Commits when the block finishes and rolls back if it raises."""
-        with closing(sqlite3.connect(self.path)) as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
-            yield connection
+    def close(self) -> None:
+        self.connection.close()
 
-    def load(self, day: date) -> Day | None:
-        with closing(sqlite3.connect(self.path)) as connection:
-            return self._load(connection, day)
-
-    def list_dates(self) -> tuple[date, ...]:
-        with closing(sqlite3.connect(self.path)) as connection:
-            return tuple(
-                date.fromisoformat(value)
-                for (value,) in connection.execute(
-                    "SELECT date FROM days ORDER BY date DESC"
-                )
-            )
-
-    def _load(self, connection: sqlite3.Connection, day: date) -> Day | None:
-        row = connection.execute(
+    def load(self, day: date) -> Day:
+        row = self.connection.execute(
             "SELECT data FROM days WHERE date = ?", (day.isoformat(),)
         ).fetchone()
-        return None if row is None else decode(day, row[0])
+        return empty_day(day) if row is None else decode(day, row[0])
 
-    def _expect_day(
-        self, connection: sqlite3.Connection, list_date: date, expected: Day | None
-    ) -> None:
-        # compares parsed days, so stored text need not match encode exactly
-        if self._load(connection, list_date) != expected:
-            detail = (
-                f"The list for {list_date} already exists. "
-                if expected is None
-                else "This list changed in another session. "
+    def list_dates(self) -> tuple[date, ...]:
+        return tuple(
+            date.fromisoformat(value)
+            for (value,) in self.connection.execute(
+                "SELECT date FROM days ORDER BY date DESC"
             )
-            raise Conflict(detail + "Switch to another day and back to reload it.")
+        )
 
-    def save(self, day: Day, *, expected: Day | None = None) -> None:
-        # expected=None requires absence; otherwise the stored day must match
-        with self.transaction() as connection:
-            self._expect_day(connection, day.date, expected)
-            connection.execute(
-                "INSERT OR REPLACE INTO days VALUES (?, ?)",
-                (day.date.isoformat(), encode(day)),
-            )
-
-    def delete(self, expected: Day) -> None:
-        with self.transaction() as connection:
-            self._expect_day(connection, expected.date, expected)
-            connection.execute(
-                "DELETE FROM days WHERE date = ?", (expected.date.isoformat(),)
-            )
+    def save(self, day: Day) -> None:
+        with self.connection:
+            if day.blank:
+                self.connection.execute(
+                    "DELETE FROM days WHERE date = ?", (day.date.isoformat(),)
+                )
+            else:
+                self.connection.execute(
+                    "INSERT OR REPLACE INTO days VALUES (?, ?)",
+                    (day.date.isoformat(), encode(day)),
+                )

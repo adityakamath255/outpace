@@ -215,6 +215,16 @@ class Day:
         if len(ids) != len(set(ids)):
             raise ValueError("Task and section identities must be unique.")
 
+    @property
+    def blank(self) -> bool:
+        """Nothing planned: what a day without a saved list looks like."""
+        return (
+            not self.intervals
+            and len(self.sections) == 1
+            and not self.sections[0].title
+            and not self.sections[0].tasks
+        )
+
     def tasks(self) -> Iterator[tuple[Section, Task]]:
         return ((section, task) for section in self.sections for task in section.tasks)
 

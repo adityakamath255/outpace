@@ -26,7 +26,7 @@ from textual.widgets import (
 )
 from textual.widgets.option_list import Option
 
-from .db import Conflict, Store
+from .db import Store
 from .model import (
     DAY_MINUTES,
     Day,
@@ -35,7 +35,6 @@ from .model import (
     Task,
     clock,
     duration,
-    empty_day,
     format_schedule,
     number,
     parse_date,
@@ -249,9 +248,6 @@ def stats(day: Day, now: datetime, width: int, full_title: str | None) -> Group:
 
 class Change(NamedTuple):
     previous: Day
-    previous_persisted: bool
-    # the stored day this change produced; undo applies only while it is current
-    after: Day
     description: str
     # the row to select after undoing: a task or section id
     subject: str | None
@@ -505,9 +501,10 @@ class TodoApp(App):
     def __init__(self, store: Store, list_date: date):
         super().__init__(ansi_color=True)
         self.store = store
-        # undo history per date, kept while the app runs
+        # undo history per date, kept while the app runs; the store's lock
+        # means nothing else changes a day behind it
         self.histories: dict[date, list[Change]] = {}
-        self._load_day(list_date)
+        self.day = store.load(list_date)
 
     @property
     def history(self) -> tuple[Change, ...]:
@@ -521,16 +518,6 @@ class TodoApp(App):
     def trim_messages(self) -> None:
         for notification in list(self._notifications)[:-MAX_MESSAGES]:
             self._unnotify(notification)
-
-    def _load_day(self, list_date: date) -> None:
-        saved = self.store.load(list_date)
-        self.day = saved if saved is not None else empty_day(list_date)
-        self.persisted = saved is not None
-        history = self.histories.get(list_date)
-        # another session changed this day since the last change here, so
-        # undoing would overwrite their work; each entry depends on the next
-        if history and history[-1].after != self.day:
-            del self.histories[list_date]
 
     def compose(self) -> ComposeResult:
         yield Static("", id="date")
@@ -582,7 +569,7 @@ class TodoApp(App):
     def switch_day(self, list_date: date) -> None:
         if list_date == self.day.date:
             return
-        self._load_day(list_date)
+        self.day = self.store.load(list_date)
         self.redraw(self.first_row())
 
     def selected(self) -> tuple[Section, Task | None]:
@@ -670,12 +657,11 @@ class TodoApp(App):
         change unless select names another row, and again after undoing."""
         if day == self.day:
             return
-        self.store.save(day, expected=self.day if self.persisted else None)
+        self.store.save(day)
         self.histories.setdefault(day.date, []).append(
-            Change(self.day, self.persisted, day, description, subject)
+            Change(self.day, description, subject)
         )
         self.day = day
-        self.persisted = True
         self.redraw(select or subject)
 
     def save_or_notify(
@@ -724,7 +710,7 @@ class TodoApp(App):
 
         def reuse(value: str) -> None:
             source = self.store.load(parse_date(value))
-            if source is None:
+            if source.blank:
                 raise ValueError(f"There is no saved list for {value.strip()}.")
             self.save_change(
                 source.copy_to(self.day.date),
@@ -876,21 +862,12 @@ class TodoApp(App):
             return
         change = history[-1]
         try:
-            if change.previous_persisted:
-                self.store.save(change.previous, expected=change.after)
-            else:
-                self.store.delete(change.after)
-        except Conflict as error:
-            # the stored day no longer matches this history, so none of it applies
-            del self.histories[self.day.date]
-            self.notify(str(error), title="Could not undo", severity="error", timeout=8)
-            return
+            self.store.save(change.previous)
         except RECOVERABLE as error:
             self.notify(str(error), title="Could not undo", severity="error", timeout=8)
             return
         history.pop()
         self.day = change.previous
-        self.persisted = change.previous_persisted
         self.redraw(change.subject)
         self.notify(f"Undid: {change.description}", timeout=4, markup=False)
 
@@ -917,4 +894,7 @@ def main() -> None:
         app = TodoApp(store, args.date)
     except RECOVERABLE as error:
         parser.exit(2, f"todo: {error}\n")
-    app.run()
+    try:
+        app.run()
+    finally:
+        store.close()
