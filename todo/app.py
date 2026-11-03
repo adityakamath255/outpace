@@ -1,6 +1,7 @@
 import argparse
 import re
 import sqlite3
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from fractions import Fraction
@@ -17,33 +18,35 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import (
-    Button,
-    Checkbox,
     Footer,
     Input,
     Label,
     OptionList,
-    Select,
     Static,
 )
 from textual.widgets.option_list import Option
 
-from .db import Store
+from .db import Conflict, Store
 from .model import (
+    DAY_MINUTES,
     Day,
     Interval,
     Section,
     Task,
+    clock,
     duration,
     empty_day,
+    format_schedule,
     number,
-    parse_interval,
+    parse_date,
     parse_minutes,
+    parse_schedule,
     per_point,
     percentage,
     points,
     ratio,
     score,
+    seconds_into,
     time_progress,
 )
 
@@ -159,14 +162,15 @@ def meter(
     return text
 
 
-def schedule_status(intervals: tuple[Interval, ...], now: datetime) -> str:
+def schedule_status(intervals: tuple[Interval, ...], now: int) -> str:
+    """now is seconds_into the list's day."""
     if not intervals:
         return "No schedule"
-    if now < min(interval.start for interval in intervals):
+    if now < min(interval.start for interval in intervals) * 60:
         return "Not started"
-    if now >= max(interval.end for interval in intervals):
+    if now >= max(interval.end for interval in intervals) * 60:
         return "Schedule ended"
-    if any(interval.start <= now < interval.end for interval in intervals):
+    if any(i.start * 60 <= now < i.end * 60 for i in intervals):
         return "In progress"
     return "Between intervals"
 
@@ -174,7 +178,8 @@ def schedule_status(intervals: tuple[Interval, ...], now: datetime) -> str:
 def schedule_blocks(
     day: Day, now: datetime, earned: Fraction, available: Fraction, width: int
 ) -> list[RenderableType]:
-    elapsed, total = time_progress(day.intervals, now)
+    now_seconds = seconds_into(day.date, now)
+    elapsed, total = time_progress(day.intervals, now_seconds)
     progress, time_ratio = ratio(earned, available), ratio(elapsed, total)
     value = units(duration(elapsed)) + Text(" / ") + units(duration(total))
     status = Text()
@@ -188,7 +193,7 @@ def schedule_blocks(
         else:
             style, word = "bold", "on pace"
         status.append(f"{percentage(difference, signed=True)} pp {word}\n", style=style)
-    status.append(schedule_status(day.intervals, now).lower())
+    status.append(schedule_status(day.intervals, now_seconds).lower())
     if not total:
         remaining = Text("n/a")
     elif elapsed == total:
@@ -204,8 +209,8 @@ def schedule_blocks(
     for index, interval in enumerate(day.intervals):
         if index:
             intervals.append("  ")
-        intervals.append(f"{interval.start:%H:%M}-{interval.end:%H:%M}")
-        if (interval.start.date() - day.date).days:
+        intervals.append(f"{clock(interval.start)}-{clock(interval.end)}")
+        if interval.start >= DAY_MINUTES:
             intervals.append(" next day", style="dim")
     return [meter("time", value, time_ratio, "cyan", width), status, pace, intervals]
 
@@ -338,142 +343,71 @@ class VimScroll(VerticalScroll):
     ]
 
 
-class FormSelect(Select):
-    # the expanded menu handles Enter before this binding is considered
-    BINDINGS = [Binding("enter", "screen.save", "Save", show=False)]
+class Form(ModalScreen):
+    """A dialog whose save either succeeds or keeps the draft and says why.
 
+    Subclasses compose an #error Static and implement save, which raises a
+    RECOVERABLE error to keep the dialog open and dismisses it when done."""
 
-class DialogButtons(Horizontal):
-    BINDINGS = [
-        Binding("left,up,h,k", "move(-1)", "Previous button", show=False),
-        Binding("right,down,j,l", "move(1)", "Next button", show=False),
-    ]
-
-    def action_move(self, offset: int) -> None:
-        buttons = [button for button in self.query(Button) if not button.disabled]
-        focused = self.screen.focused
-        if focused in buttons:
-            buttons[(buttons.index(focused) + offset) % len(buttons)].focus()
-
-
-class DayPicker(ModalScreen):
     BINDINGS = [("escape", "dismiss", "Cancel")]
+    AUTO_FOCUS = "Input"
 
-    def __init__(self, list_date: date):
-        super().__init__()
-        self.initial_date = list_date
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(classes="dialog", id="day-dialog"):
-            yield Label("Open a day's list", classes="dialog-title")
-            yield Label("Date (YYYY-MM-DD)", classes="field-label")
-            yield Input(
-                self.initial_date.isoformat(), id="list-date", select_on_focus=True
-            )
-            yield Static(
-                "A new date starts an empty list.",
-                classes="muted",
-            )
-            yield Static("", id="error", markup=False)
-            with DialogButtons():
-                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
-                yield Button(
-                    "Open (Enter)",
-                    id="open",
-                    variant="primary",
-                    action="screen.open",
-                )
-
-    def on_mount(self) -> None:
-        self.query_one(Input).focus()
-
-    @on(Input.Submitted)
-    def action_open(self) -> None:
-        value = self.query_one("#list-date", Input).value.strip()
-        try:
-            list_date = date.fromisoformat(value)
-            if value != list_date.isoformat():
-                raise ValueError
-        except ValueError:
-            self.query_one("#error", Static).update("Use a date in YYYY-MM-DD format.")
-            return
-        try:
-            self.app.switch_day(list_date)
-        except RECOVERABLE as error:
-            self.query_one("#error", Static).update(str(error))
-            return
-        self.dismiss()
-
-
-class PointsEditor(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel")]
-
-    def __init__(self, task: Task, section_id: str):
-        super().__init__()
-        self.edited_task = task
-        self.section_id = section_id
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(classes="dialog", id="points-dialog"):
-            yield Label("Earned points", classes="dialog-title")
-            yield Static(self.edited_task.title, markup=False, classes="muted")
-            yield Label(
-                f"Earned, out of {number(self.edited_task.available)}",
-                classes="field-label",
-            )
-            yield Input(
-                number(self.edited_task.earned), id="earned", select_on_focus=True
-            )
-            yield Static("", id="error", markup=False)
-            with DialogButtons():
-                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
-                yield Button(
-                    "Save (Enter)",
-                    id="save",
-                    variant="primary",
-                    action="screen.save",
-                )
-
-    def on_mount(self) -> None:
-        self.query_one(Input).focus()
+    def save(self) -> None:
+        raise NotImplementedError
 
     @on(Input.Submitted)
     def action_save(self) -> None:
         try:
-            task = replace(
-                self.edited_task, earned=points(self.query_one("#earned", Input).value)
-            )
-            self.app.save_change(
-                self.app.day.put_task(task, self.section_id),
-                progress_change(self.edited_task, task),
-                task.id,
-            )
+            self.save()
         except RECOVERABLE as error:
             self.query_one("#error", Static).update(str(error))
-            return
+
+
+class Prompt(Form):
+    """Asks for one line; on_submit acts on it, raising a RECOVERABLE error to
+    keep the prompt open with the reason shown."""
+
+    def __init__(
+        self, title: str, value: str, hint: str, on_submit: Callable[[str], None]
+    ):
+        super().__init__()
+        self.title_text = title
+        self.value = value
+        self.hint = hint
+        self.on_submit = on_submit
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog", id="prompt-dialog"):
+            yield Label(self.title_text, classes="dialog-title", markup=False)
+            yield Input(self.value, compact=True)
+            yield Static("", id="error", markup=False)
+            yield Static(self.hint, classes="muted", markup=False)
+
+    def save(self) -> None:
+        self.on_submit(self.query_one(Input).value)
         self.dismiss()
 
 
-class TaskEditor(ModalScreen):
-    """Adds tasks one after another until closed, or edits one task."""
+class TaskEditor(Form):
+    """Edits one task, or adds tasks one after another until closed; on_submit
+    saves each, raising a RECOVERABLE error to keep the draft."""
 
-    BINDINGS = [("escape", "dismiss", "Close")]
-
-    def __init__(self, task: Task | None, section: Section):
+    def __init__(
+        self, task: Task | None, heading: str, on_submit: Callable[[Task], None]
+    ):
         super().__init__()
         self.edited_task = task
-        self.section = section
+        self.heading = heading
+        self.on_submit = on_submit
 
     def compose(self) -> ComposeResult:
         task = self.edited_task
         if task:
-            heading = "Edit task"
             hint = "⏎ save · esc cancel · blank points for unscored"
         else:
-            heading = f"Add tasks to {section_label(self.section)}"
             hint = "⏎ add and start the next · esc close · blank points for unscored"
         with Vertical(classes="dialog", id="task-dialog"):
-            yield Label(heading, classes="dialog-title", markup=False)
+            yield Label(self.heading, classes="dialog-title", markup=False)
             with Horizontal(id="task-fields"):
                 yield Label("pts")
                 yield Input(
@@ -503,82 +437,22 @@ class TaskEditor(ModalScreen):
             yield Static("", id="added", classes="muted", markup=False)
             yield Static(hint, classes="muted", markup=False)
 
-    def on_mount(self) -> None:
-        self.query_one("#available", Input).focus()
-
-    @on(Input.Submitted)
-    def action_save(self) -> None:
-        edited = self.edited_task
-        try:
-            available_text = self.query_one("#available", Input).value.strip()
-            available = points(available_text) if available_text else None
-            title = self.query_one("#title", Input).value
-            minutes = parse_minutes(self.query_one("#minutes", Input).value)
-            task = (
-                edited.edit(title, available, minutes)
-                if edited
-                else Task(title, available, minutes=minutes)
-            )
-            self.app.save_change(
-                self.app.day.put_task(task, self.section.id),
-                f"{'edited' if edited else 'added'} {task.title}",
-                task.id,
-            )
-        except RECOVERABLE as error:
-            self.query_one("#error", Static).update(str(error))
-            return
-        if edited:
+    def save(self) -> None:
+        available_text = self.query_one("#available", Input).value.strip()
+        available = points(available_text) if available_text else None
+        title = self.query_one("#title", Input).value
+        minutes = parse_minutes(self.query_one("#minutes", Input).value)
+        if self.edited_task:
+            self.on_submit(self.edited_task.edit(title, available, minutes))
             self.dismiss()
             return
+        task = Task(title, available, minutes=minutes)
+        self.on_submit(task)
         for field in self.query(Input):
             field.value = ""
         self.query_one("#error", Static).update("")
         self.query_one("#added", Static).update(f"added {task.title}")
         self.query_one("#available", Input).focus()
-
-
-class SectionEditor(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel")]
-
-    def __init__(self, section: Section):
-        super().__init__()
-        self.section = section
-
-    def compose(self) -> ComposeResult:
-        with Vertical(classes="dialog", id="section-dialog"):
-            yield Label("Rename section", classes="dialog-title")
-            yield Input(
-                self.section.title,
-                placeholder="untitled",
-                id="section-name",
-                compact=True,
-            )
-            yield Static("", id="error", markup=False)
-            yield Static(
-                "⏎ save · esc cancel · blank for untitled",
-                classes="muted",
-                markup=False,
-            )
-
-    def on_mount(self) -> None:
-        self.query_one(Input).focus()
-
-    @on(Input.Submitted)
-    def action_save(self) -> None:
-        try:
-            day = self.app.day.rename_section(
-                self.section.id, self.query_one(Input).value
-            )
-            renamed = next(s for s in day.sections if s.id == self.section.id)
-            self.app.save_change(
-                day,
-                f"renamed {section_label(self.section)} to {section_label(renamed)}",
-                self.section.id,
-            )
-        except RECOVERABLE as error:
-            self.query_one("#error", Static).update(str(error))
-            return
-        self.dismiss()
 
 
 class HelpScreen(ModalScreen):
@@ -598,174 +472,6 @@ class HelpScreen(ModalScreen):
                 text.append(description)
         with VimScroll(classes="dialog", id="help-dialog"):
             yield Static(text)
-
-    def on_mount(self) -> None:
-        self.query_one(VimScroll).focus()
-
-
-class IntervalRow(Horizontal):
-    def __init__(self, list_date: date, interval: Interval | None = None):
-        super().__init__(classes="interval-row")
-        self.list_date = list_date
-        self.initial_interval = interval
-
-    def compose(self) -> ComposeResult:
-        interval = self.initial_interval
-        with Vertical(classes="interval-clock"):
-            yield Label("Start")
-            yield Input(
-                f"{interval.start:%H:%M}" if interval else "",
-                placeholder="07:30",
-                classes="interval-start",
-            )
-        with Vertical(classes="interval-clock"):
-            yield Label("End")
-            yield Input(
-                f"{interval.end:%H:%M}" if interval else "",
-                placeholder="11:00",
-                classes="interval-end",
-            )
-        yield Checkbox(
-            "Starts next day",
-            value=interval is not None and interval.start.date() > self.list_date,
-        )
-        yield Button("Remove", classes="remove-interval")
-
-    def read_interval(self) -> Interval:
-        return parse_interval(
-            self.list_date,
-            self.query_one(".interval-start", Input).value,
-            self.query_one(".interval-end", Input).value,
-            next_day=self.query_one(Checkbox).value,
-        )
-
-    @on(Button.Pressed, ".remove-interval")
-    async def remove_interval(self, event: Button.Pressed) -> None:
-        event.stop()
-        await self.remove()
-
-
-class ScheduleEditor(ModalScreen):
-    BINDINGS = [
-        ("escape", "dismiss", "Cancel"),
-        ("ctrl+n", "add_interval", "Add interval"),
-    ]
-
-    def __init__(self, day: Day):
-        super().__init__()
-        self.edited_day = day
-
-    def compose(self) -> ComposeResult:
-        with VerticalScroll(classes="dialog", id="schedule-dialog"):
-            yield Label("Schedule", classes="dialog-title")
-            yield Static(
-                "Use 24-hour times. An end before its start means overnight. "
-                "Tick Starts next day for an interval beginning after midnight. "
-                "Remove all intervals to clear the schedule.",
-                classes="muted",
-            )
-            with Vertical(id="interval-rows"):
-                for interval in self.edited_day.intervals:
-                    yield IntervalRow(self.edited_day.date, interval)
-            yield Button("Add interval", id="add-interval")
-            yield Static("", id="error", markup=False)
-            with DialogButtons():
-                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
-                yield Button(
-                    "Save (Enter)",
-                    id="save",
-                    variant="primary",
-                    action="screen.save",
-                )
-
-    def on_mount(self) -> None:
-        first_start = next(iter(self.query(".interval-start")), None)
-        if first_start is None:
-            self.query_one("#add-interval", Button).focus()
-        else:
-            first_start.focus()
-
-    def on_resize(self) -> None:
-        self.set_class(self.size.width < 72, "narrow")
-
-    @on(Button.Pressed, "#add-interval")
-    async def action_add_interval(self) -> None:
-        row = IntervalRow(self.edited_day.date)
-        await self.query_one("#interval-rows", Vertical).mount(row)
-        row.query_one(".interval-start", Input).focus()
-
-    @on(Input.Submitted)
-    def action_save(self) -> None:
-        try:
-            intervals = tuple(
-                sorted(
-                    (row.read_interval() for row in self.query(IntervalRow)),
-                    key=lambda interval: interval.start,
-                )
-            )
-            day = replace(self.app.day, intervals=intervals)
-            self.app.save_change(day, "changed the schedule")
-        except RECOVERABLE as error:
-            self.query_one("#error", Static).update(str(error))
-            return
-        self.dismiss()
-
-
-class ReuseDay(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel")]
-
-    def __init__(self, list_date: date, sources: tuple[date, ...]):
-        super().__init__()
-        self.list_date = list_date
-        self.sources = sources
-
-    def compose(self) -> ComposeResult:
-        source = next((d for d in self.sources if d < self.list_date), self.sources[0])
-        with VerticalScroll(classes="dialog", id="reuse-dialog"):
-            yield Label("Reuse a day's list", classes="dialog-title")
-            yield Label("Copy from (Space/Down to choose)", classes="field-label")
-            yield FormSelect(
-                [(f"{d:%a} {d.isoformat()}", d) for d in self.sources],
-                value=source,
-                allow_blank=False,
-                id="source-day",
-            )
-            notice = Text()
-            notice.append(
-                f"Replaces the list for {self.list_date.isoformat()}.\n", style="bold"
-            )
-            notice.append(
-                "Copies tasks, sections, points, estimates, and schedule. "
-                "Earned points and completion reset.\n\n"
-            )
-            notice.append("Undo restores this day's previous list.", style="dim")
-            yield Static(notice, id="reuse-notice")
-            yield Static("", id="error", markup=False)
-            with DialogButtons():
-                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
-                yield Button(
-                    "Reuse (Enter)",
-                    id="save",
-                    variant="primary",
-                    action="screen.save",
-                )
-
-    def on_mount(self) -> None:
-        self.query_one(Select).focus()
-
-    def action_save(self) -> None:
-        try:
-            source = self.app.store.load(self.query_one(Select).value)
-            if source is None:
-                raise ValueError("That day's list no longer exists. Choose another.")
-            self.app.save_change(
-                source.copy_to(self.list_date),
-                f"replaced the list with {source.date.isoformat()}'s",
-            )
-        except RECOVERABLE as error:
-            self.query_one("#error", Static).update(str(error))
-            return
-        self.dismiss()
 
 
 class TodoApp(App):
@@ -841,12 +547,19 @@ class TodoApp(App):
 
     def on_mount(self) -> None:
         self.theme = "ansi-dark"
-        self.redraw()
+        self.redraw(self.first_row())
         self.set_interval(1, self.refresh_stats)
         self.query_one("#tasks", TaskList).focus()
 
     def action_choose_day(self) -> None:
-        self.push_screen(DayPicker(self.day.date))
+        self.push_screen(
+            Prompt(
+                "Open a day's list",
+                self.day.date.isoformat(),
+                "⏎ open · esc cancel · YYYY-MM-DD; a new date starts an empty list",
+                lambda value: self.switch_day(parse_date(value)),
+            )
+        )
 
     def action_shift_day(self, offset: int) -> None:
         try:
@@ -870,8 +583,7 @@ class TodoApp(App):
         if list_date == self.day.date:
             return
         self._load_day(list_date)
-        self.query_one("#tasks", TaskList).highlighted = None
-        self.redraw()
+        self.redraw(self.first_row())
 
     def selected(self) -> tuple[Section, Task | None]:
         """The highlighted row: a task with its section, or a section's rule.
@@ -888,9 +600,9 @@ class TodoApp(App):
                         return section, task
         raise RuntimeError("the task list has no highlighted row")
 
-    def selected_task(self) -> tuple[Section, Task] | None:
-        section, task = self.selected()
-        return None if task is None else (section, task)
+    def first_row(self) -> str:
+        """Where a freshly opened day starts: its first task, else its first rule."""
+        return next((task.id for _, task in self.day.tasks()), self.day.sections[0].id)
 
     def redraw(self, selection: str | None = None) -> None:
         widget = self.query_one("#tasks", TaskList)
@@ -906,14 +618,10 @@ class TodoApp(App):
         widget.clear_options().add_options(options)
         ids = [option.id for option in options]
         if selection in ids:
-            target = ids.index(selection)
-        elif old_index is not None:
-            target = min(old_index, len(ids) - 1)
+            widget.highlighted = ids.index(selection)
         else:
-            # a freshly opened day starts on its first task
-            first = next((task.id for _, task in self.day.tasks()), ids[0])
-            target = ids.index(first)
-        widget.highlighted = target
+            # the selected row is gone, so keep the cursor where it was
+            widget.highlighted = min(old_index or 0, len(ids) - 1)
         self.query_one("#empty", Static).display = not any(self.day.tasks())
         self.query_one("#date", Static).update(
             Text(f"{self.day.date:%a} {self.day.date.isoformat()}", style="bold")
@@ -924,12 +632,13 @@ class TodoApp(App):
         if not self.is_running:
             return
         full_title = None
-        if selected := self.selected_task():
+        _, task = self.selected()
+        if task is not None:
             tasks = self.query_one("#tasks", TaskList)
             # option padding takes one column on each side
             width = tasks.scrollable_content_region.width - 2 - FIXED_WIDTH
-            if Text(selected[1].title).cell_len > width:
-                full_title = selected[1].title
+            if Text(task.title).cell_len > width:
+                full_title = task.title
         pane = self.query_one("#stats", Static)
         pane.update(
             stats(self.day, datetime.now(), pane.content_region.width, full_title)
@@ -943,11 +652,11 @@ class TodoApp(App):
     def activate(self) -> None:
         section, task = self.selected()
         if task is None:
-            self.push_screen(SectionEditor(section))
+            self.rename_section(section)
         elif task.available is None:
             self.action_complete()
         else:
-            self.push_screen(PointsEditor(task, section.id))
+            self.edit_points(task, task.available)
 
     def save_change(
         self,
@@ -983,7 +692,16 @@ class TodoApp(App):
             self.notify(str(error), title="Could not save", severity="error", timeout=8)
 
     def action_add(self) -> None:
-        self.push_screen(TaskEditor(None, self.selected()[0]))
+        section = self.selected()[0]
+        self.push_screen(
+            TaskEditor(
+                None,
+                f"Add tasks to {section_label(section)}",
+                lambda task: self.save_change(
+                    self.day.add_task(task, section.id), f"added {task.title}", task.id
+                ),
+            )
+        )
 
     def action_new_section(self) -> None:
         section = Section("")
@@ -1002,34 +720,109 @@ class TodoApp(App):
         if not sources:
             self.notify("No other saved lists yet.")
             return
-        self.push_screen(ReuseDay(self.day.date, sources))
+        latest = next((d for d in sources if d < self.day.date), sources[0])
+
+        def reuse(value: str) -> None:
+            source = self.store.load(parse_date(value))
+            if source is None:
+                raise ValueError(f"There is no saved list for {value.strip()}.")
+            self.save_change(
+                source.copy_to(self.day.date),
+                f"replaced the list with {source.date.isoformat()}'s",
+            )
+
+        self.push_screen(
+            Prompt(
+                f"Replace the list for {self.day.date:%a %Y-%m-%d} with a copy of",
+                latest.isoformat(),
+                "⏎ copy · esc cancel · progress starts over; u undoes",
+                reuse,
+            )
+        )
 
     def action_edit(self) -> None:
         section, task = self.selected()
         if task is None:
-            self.push_screen(SectionEditor(section))
+            self.rename_section(section)
         else:
-            self.push_screen(TaskEditor(task, section))
+            self.push_screen(
+                TaskEditor(
+                    task,
+                    "Edit task",
+                    lambda edited: self.save_change(
+                        self.day.replace_task(edited),
+                        f"edited {edited.title}",
+                        edited.id,
+                    ),
+                )
+            )
 
     def action_rename_section(self) -> None:
-        self.push_screen(SectionEditor(self.selected()[0]))
+        self.rename_section(self.selected()[0])
+
+    def rename_section(self, section: Section) -> None:
+        def rename(value: str) -> None:
+            day = self.day.rename_section(section.id, value)
+            renamed = next(s for s in day.sections if s.id == section.id)
+            self.save_change(
+                day,
+                f"renamed {section_label(section)} to {section_label(renamed)}",
+                section.id,
+            )
+
+        self.push_screen(
+            Prompt(
+                "Rename section",
+                section.title,
+                "⏎ save · esc cancel · blank for untitled",
+                rename,
+            )
+        )
+
+    def edit_points(self, task: Task, available: Fraction) -> None:
+        def save(value: str) -> None:
+            after = replace(task, earned=points(value))
+            self.save_change(
+                self.day.replace_task(after), progress_change(task, after), task.id
+            )
+
+        self.push_screen(
+            Prompt(
+                f"Points earned on {task.title}",
+                number(task.earned),
+                f"⏎ save · esc cancel · out of {number(available)}",
+                save,
+            )
+        )
 
     def action_schedule(self) -> None:
-        self.push_screen(ScheduleEditor(self.day))
+        self.push_screen(
+            Prompt(
+                "Schedule",
+                format_schedule(self.day.intervals),
+                "⏎ save · esc cancel · 24-hour times in order, like "
+                "07:30-11:00, 16:00-23:00; past midnight continues into the "
+                "next day; blank clears",
+                lambda value: self.save_change(
+                    replace(self.day, intervals=parse_schedule(value)),
+                    "changed the schedule",
+                ),
+            )
+        )
 
     def action_complete(self) -> None:
-        if selected := self.selected_task():
-            self.save_progress(*selected, selected[1].toggle())
+        _, task = self.selected()
+        if task is not None:
+            self.save_progress(task, task.toggle())
 
     def action_step(self, delta: int) -> None:
-        if selected := self.selected_task():
-            self.save_progress(*selected, selected[1].step(delta))
+        _, task = self.selected()
+        if task is not None:
+            self.save_progress(task, task.step(delta))
 
-    def save_progress(self, section: Section, before: Task, after: Task) -> None:
+    def save_progress(self, before: Task, after: Task) -> None:
         self.save_or_notify(
-            self.day.put_task(after, section.id),
-            progress_change(before, after),
-            after.id,
+            self.day.replace_task(after), progress_change(before, after), after.id
         )
 
     def action_delete(self) -> None:
@@ -1087,7 +880,7 @@ class TodoApp(App):
                 self.store.save(change.previous, expected=change.after)
             else:
                 self.store.delete(change.after)
-        except ValueError as error:
+        except Conflict as error:
             # the stored day no longer matches this history, so none of it applies
             del self.histories[self.day.date]
             self.notify(str(error), title="Could not undo", severity="error", timeout=8)

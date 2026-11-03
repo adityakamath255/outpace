@@ -1,7 +1,7 @@
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from itertools import pairwise
@@ -13,6 +13,7 @@ MAX_MINUTES = 2**63 - 1
 _MINUTES_ERROR = "Use a positive whole number of minutes."
 _MINUTES_TOO_LARGE = "Estimate too large."
 _CLOCK_ERROR = "Use a 24-hour time in H:MM or HH:MM format."
+DAY_MINUTES = 24 * 60
 
 
 def identifier() -> str:
@@ -20,30 +21,24 @@ def identifier() -> str:
 
 
 def points(value: str) -> Fraction:
-    if not re.fullmatch(r"\d+(?:\.\d+)?", value.strip()):
+    value = value.strip()
+    if not re.fullmatch(r"\d+(?:\.\d+)?", value):
         raise ValueError("Use a nonnegative decimal for points, such as 2.5.")
-    return Fraction(value.strip())
-
-
-def _check_minutes(minutes: int) -> None:
-    if not minutes > 0:
-        raise ValueError(_MINUTES_ERROR)
-    if minutes > MAX_MINUTES:
-        raise ValueError(_MINUTES_TOO_LARGE)
+    return Fraction(value)
 
 
 def parse_minutes(value: str) -> int | None:
+    """Reads an estimate; Task decides which estimates are allowed."""
     value = value.strip()
     if not value:
         return None
     if not value.isdecimal():
         raise ValueError(_MINUTES_ERROR)
     try:
-        minutes = int(value)
+        return int(value)
     except ValueError as error:
+        # past the interpreter's limit on digits in a string conversion
         raise ValueError(_MINUTES_TOO_LARGE) from error
-    _check_minutes(minutes)
-    return minutes
 
 
 @dataclass(frozen=True)
@@ -70,7 +65,10 @@ class Task:
         elif self.earned:
             raise ValueError("Unscored tasks cannot have earned points.")
         if self.minutes is not None:
-            _check_minutes(self.minutes)
+            if self.minutes <= 0:
+                raise ValueError(_MINUTES_ERROR)
+            if self.minutes > MAX_MINUTES:
+                raise ValueError(_MINUTES_TOO_LARGE)
 
     @property
     def complete(self) -> bool:
@@ -123,53 +121,93 @@ class Section:
 
 @dataclass(frozen=True)
 class Interval:
-    start: datetime
-    end: datetime
+    """Minutes from the start of the list's day; from DAY_MINUTES on is the
+    next day, so a list's schedule can run past midnight."""
+
+    start: int
+    end: int
 
     def __post_init__(self) -> None:
+        if self.start < 0:
+            raise ValueError("An interval cannot start before its day.")
         if self.end <= self.start:
             raise ValueError("An interval must end after it starts.")
 
     @property
     def seconds(self) -> int:
-        return int((self.end - self.start).total_seconds())
+        return (self.end - self.start) * 60
 
 
-def parse_interval(
-    day: date, start: str, end: str, *, next_day: bool = False
-) -> Interval:
-    clocks = (start.strip(), end.strip())
-    if any(re.fullmatch(r"\d{1,2}:\d{2}", clock) is None for clock in clocks):
+def _clock(text: str) -> int:
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text.strip())
+    if match is None or int(match[1]) > 23 or int(match[2]) > 59:
         raise ValueError(_CLOCK_ERROR)
-    try:
-        start_clock, end_clock = (time.strptime(clock, "%H:%M") for clock in clocks)
-    except ValueError as error:
-        raise ValueError(_CLOCK_ERROR) from error
-    if start_clock == end_clock:
-        raise ValueError("An interval cannot have identical start and end times.")
-    try:
-        start_day = day + timedelta(days=1) if next_day else day
-        start_at = datetime.combine(start_day, start_clock)
-        end_at = datetime.combine(start_day, end_clock)
-        if end_clock < start_clock:
-            end_at += timedelta(days=1)
-    except OverflowError as error:
+    return int(match[1]) * 60 + int(match[2])
+
+
+def parse_schedule(text: str) -> tuple[Interval, ...]:
+    """Reads intervals written in order, like 07:30-11:00, 16:00-23:00.
+
+    The first starts on the list's day. Each later one starts at the first time
+    with its clock reading at or after the previous end, so writing past
+    midnight continues into the next day; blank means no schedule."""
+    intervals: list[Interval] = []
+    for part in filter(None, (part.strip() for part in text.split(","))):
+        start_text, dash, end_text = part.partition("-")
+        if not dash:
+            raise ValueError("Write each interval as start-end, like 07:30-11:00.")
+        start, end = _clock(start_text), _clock(end_text)
+        if start == end:
+            raise ValueError("An interval cannot have identical start and end times.")
+        previous_end = intervals[-1].end if intervals else 0
+        while start < previous_end:
+            start += DAY_MINUTES
+        intervals.append(Interval(start, start + (end - start) % DAY_MINUTES))
+    # an interval written out of order would otherwise roll silently into tomorrow
+    if intervals and intervals[-1].end - intervals[0].start > DAY_MINUTES:
         raise ValueError(
-            "Scheduled interval exceeds the supported date range."
-        ) from error
-    return Interval(start_at, end_at)
+            "The schedule spans more than 24 hours; write its intervals in order."
+        )
+    return tuple(intervals)
+
+
+def format_schedule(intervals: tuple[Interval, ...]) -> str:
+    return ", ".join(f"{clock(i.start)}-{clock(i.end)}" for i in intervals)
+
+
+def parse_date(value: str) -> date:
+    value = value.strip()
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        parsed = None
+    # fromisoformat also accepts forms like 20261102
+    if parsed is None or value != parsed.isoformat():
+        raise ValueError("Use a date in YYYY-MM-DD format.")
+    return parsed
+
+
+def clock(minutes: int) -> str:
+    return f"{minutes // 60 % 24:02d}:{minutes % 60:02d}"
+
+
+def seconds_into(list_date: date, now: datetime) -> int:
+    """Seconds from the start of the list's day, comparable with its intervals."""
+    return int((now - datetime.combine(list_date, time())).total_seconds())
 
 
 @dataclass(frozen=True)
 class Day:
     date: date
+    # stored in start order whatever order they are given in
     intervals: tuple[Interval, ...]
     sections: tuple[Section, ...]
 
     def __post_init__(self) -> None:
         if not self.sections:
             raise ValueError("A list needs at least one section.")
-        ordered = sorted(self.intervals, key=lambda interval: interval.start)
+        ordered = tuple(sorted(self.intervals, key=lambda interval: interval.start))
+        object.__setattr__(self, "intervals", ordered)
         if any(a.end > b.start for a, b in pairwise(ordered)):
             raise ValueError("Scheduled intervals cannot overlap.")
         ids = [section.id for section in self.sections]
@@ -181,16 +219,6 @@ class Day:
         return ((section, task) for section in self.sections for task in section.tasks)
 
     def copy_to(self, list_date: date) -> Day:
-        offset = list_date - self.date
-        try:
-            intervals = tuple(
-                Interval(interval.start + offset, interval.end + offset)
-                for interval in self.intervals
-            )
-        except OverflowError as error:
-            raise ValueError(
-                "Scheduled interval exceeds the supported date range."
-            ) from error
         sections = tuple(
             Section(
                 section.title,
@@ -201,7 +229,7 @@ class Day:
             )
             for section in self.sections
         )
-        return Day(list_date, intervals, sections)
+        return Day(list_date, self.intervals, sections)
 
     def _section_index(self, section_id: str) -> int:
         for index, section in enumerate(self.sections):
@@ -240,19 +268,23 @@ class Day:
             self, sections=self.sections[:index] + self.sections[index + 1 :]
         )
 
-    def put_task(self, task: Task, section_id: str) -> Day:
-        if not any(section.id == section_id for section in self.sections):
-            raise ValueError("Choose a section.")
-        sections = []
-        for section in self.sections:
-            if section.id == section_id:
-                tasks = tuple(task if t.id == task.id else t for t in section.tasks)
-                if all(t.id != task.id for t in section.tasks):
-                    tasks += (task,)
-            else:
-                tasks = tuple(t for t in section.tasks if t.id != task.id)
-            sections.append(replace(section, tasks=tasks))
+    def add_task(self, task: Task, section_id: str) -> Day:
+        index = self._section_index(section_id)
+        sections = list(self.sections)
+        sections[index] = replace(
+            sections[index], tasks=sections[index].tasks + (task,)
+        )
         return replace(self, sections=tuple(sections))
+
+    def replace_task(self, task: Task) -> Day:
+        """Replaces the task with the same id, wherever it is."""
+        return replace(
+            self,
+            sections=tuple(
+                replace(s, tasks=tuple(task if t.id == task.id else t for t in s.tasks))
+                for s in self.sections
+            ),
+        )
 
     def remove_task(self, task_id: str) -> Day:
         return replace(
@@ -313,12 +345,10 @@ def score(tasks: Iterable[Task]) -> tuple[Fraction, Fraction]:
     return earned, available
 
 
-def time_progress(intervals: tuple[Interval, ...], now: datetime) -> tuple[int, int]:
+def time_progress(intervals: tuple[Interval, ...], now: int) -> tuple[int, int]:
+    """Elapsed and total scheduled seconds, now being seconds_into the day."""
     return (
-        sum(
-            min(max(int((now - i.start).total_seconds()), 0), i.seconds)
-            for i in intervals
-        ),
+        sum(min(max(now - i.start * 60, 0), i.seconds) for i in intervals),
         sum(i.seconds for i in intervals),
     )
 

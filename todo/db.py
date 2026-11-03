@@ -1,67 +1,108 @@
+import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
-from datetime import date, datetime
+from datetime import date
 from fractions import Fraction
 from pathlib import Path
 
 from .model import Day, Interval, Section, Task
 
-SCHEMA = """
-BEGIN;
-CREATE TABLE days (date TEXT PRIMARY KEY);
-CREATE TABLE intervals (
-    day TEXT NOT NULL REFERENCES days(date) ON DELETE CASCADE,
-    position INTEGER NOT NULL,
-    start TEXT NOT NULL,
-    end TEXT NOT NULL,
-    PRIMARY KEY (day, position)
-);
-CREATE TABLE sections (
-    id TEXT PRIMARY KEY,
-    day TEXT NOT NULL REFERENCES days(date) ON DELETE CASCADE,
-    position INTEGER NOT NULL,
-    title TEXT NOT NULL
-);
-CREATE TABLE tasks (
-    id TEXT PRIMARY KEY,
-    section TEXT NOT NULL REFERENCES sections(id) ON DELETE CASCADE,
-    position INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    available TEXT,
-    earned TEXT NOT NULL,
-    minutes INTEGER CHECK (minutes > 0),
-    checked INTEGER NOT NULL CHECK (checked IN (0, 1))
-);
-PRAGMA user_version = 1;
-COMMIT;
-"""
+VERSION = 2
+
+
+def encode(day: Day) -> str:
+    return json.dumps(
+        {
+            "intervals": [[interval.start, interval.end] for interval in day.intervals],
+            "sections": [
+                {
+                    "id": section.id,
+                    "title": section.title,
+                    "tasks": [
+                        {
+                            "id": task.id,
+                            "title": task.title,
+                            "available": None
+                            if task.available is None
+                            else str(task.available),
+                            "earned": str(task.earned),
+                            "minutes": task.minutes,
+                            "checked": task.checked,
+                        }
+                        for task in section.tasks
+                    ],
+                }
+                for section in day.sections
+            ],
+        },
+        ensure_ascii=False,
+    )
+
+
+def decode(list_date: date, text: str) -> Day:
+    data = json.loads(text)
+    return Day(
+        list_date,
+        tuple(Interval(start, end) for start, end in data["intervals"]),
+        tuple(
+            Section(
+                section["title"],
+                tuple(
+                    Task(
+                        task["title"],
+                        None
+                        if task["available"] is None
+                        else Fraction(task["available"]),
+                        Fraction(task["earned"]),
+                        task["minutes"],
+                        task["checked"],
+                        task["id"],
+                    )
+                    for task in section["tasks"]
+                ),
+                section["id"],
+            )
+            for section in data["sections"]
+        ),
+    )
+
+
+class Conflict(ValueError):
+    """The stored day is not the one the caller expected."""
 
 
 class Store:
+    """One JSON document per day, keyed by its ISO date."""
+
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        with self.connect() as connection:
+        with self.transaction() as connection:
             version = connection.execute("PRAGMA user_version").fetchone()[0]
             if version == 0:
-                connection.executescript(SCHEMA)
-            elif version != 1:
-                raise ValueError(f"Unsupported database version {version}; expected 1.")
+                connection.execute(
+                    "CREATE TABLE days (date TEXT PRIMARY KEY, data TEXT NOT NULL)"
+                )
+            elif version != VERSION:
+                raise ValueError(
+                    f"Unsupported database version {version}; expected {VERSION}."
+                )
+            connection.execute(f"PRAGMA user_version = {VERSION}")
 
     @contextmanager
-    def connect(self) -> Iterator[sqlite3.Connection]:
-        with closing(sqlite3.connect(self.path)) as connection:
-            connection.execute("PRAGMA foreign_keys = ON")
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """Commits when the block finishes and rolls back if it raises."""
+        with closing(sqlite3.connect(self.path)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
             yield connection
 
     def load(self, day: date) -> Day | None:
-        with self.connect() as connection, connection:
-            connection.execute("BEGIN")
+        with closing(sqlite3.connect(self.path)) as connection:
             return self._load(connection, day)
 
     def list_dates(self) -> tuple[date, ...]:
-        with self.connect() as connection:
+        with closing(sqlite3.connect(self.path)) as connection:
             return tuple(
                 date.fromisoformat(value)
                 for (value,) in connection.execute(
@@ -70,105 +111,34 @@ class Store:
             )
 
     def _load(self, connection: sqlite3.Connection, day: date) -> Day | None:
-        if not connection.execute(
-            "SELECT 1 FROM days WHERE date = ?", (day.isoformat(),)
-        ).fetchone():
-            return None
-        intervals = tuple(
-            Interval(datetime.fromisoformat(start), datetime.fromisoformat(end))
-            for start, end in connection.execute(
-                "SELECT start, end FROM intervals WHERE day = ? ORDER BY position",
-                (day.isoformat(),),
-            )
-        )
-        sections = []
-        for section_id, title in connection.execute(
-            "SELECT id, title FROM sections WHERE day = ? ORDER BY position",
-            (day.isoformat(),),
-        ):
-            tasks = tuple(
-                Task(
-                    title=title,
-                    available=Fraction(available) if available is not None else None,
-                    earned=Fraction(earned),
-                    minutes=minutes,
-                    checked=bool(checked),
-                    id=task_id,
-                )
-                for task_id, title, available, earned, minutes, checked in connection.execute(
-                    "SELECT id, title, available, earned, minutes, checked "
-                    "FROM tasks WHERE section = ? ORDER BY position",
-                    (section_id,),
-                )
-            )
-            sections.append(Section(title, tasks, section_id))
-        return Day(day, intervals, tuple(sections))
+        row = connection.execute(
+            "SELECT data FROM days WHERE date = ?", (day.isoformat(),)
+        ).fetchone()
+        return None if row is None else decode(day, row[0])
 
     def _expect_day(
         self, connection: sqlite3.Connection, list_date: date, expected: Day | None
-    ) -> Day | None:
-        current = self._load(connection, list_date)
-        if current != expected:
+    ) -> None:
+        # compares parsed days, so stored text need not match encode exactly
+        if self._load(connection, list_date) != expected:
             detail = (
                 f"The list for {list_date} already exists. "
                 if expected is None
                 else "This list changed in another session. "
             )
-            raise ValueError(detail + "Switch to another day and back to reload it.")
-        return current
+            raise Conflict(detail + "Switch to another day and back to reload it.")
 
     def save(self, day: Day, *, expected: Day | None = None) -> None:
-        # expected=None requires absence; otherwise the stored snapshot must match
-        with self.connect() as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
-            current = self._expect_day(connection, day.date, expected)
-            if current is None:
-                connection.execute(
-                    "INSERT INTO days VALUES (?)", (day.date.isoformat(),)
-                )
+        # expected=None requires absence; otherwise the stored day must match
+        with self.transaction() as connection:
+            self._expect_day(connection, day.date, expected)
             connection.execute(
-                "DELETE FROM intervals WHERE day = ?", (day.date.isoformat(),)
+                "INSERT OR REPLACE INTO days VALUES (?, ?)",
+                (day.date.isoformat(), encode(day)),
             )
-            connection.execute(
-                "DELETE FROM sections WHERE day = ?", (day.date.isoformat(),)
-            )
-            connection.executemany(
-                "INSERT INTO intervals VALUES (?, ?, ?, ?)",
-                (
-                    (
-                        day.date.isoformat(),
-                        index,
-                        interval.start.isoformat(),
-                        interval.end.isoformat(),
-                    )
-                    for index, interval in enumerate(day.intervals)
-                ),
-            )
-            for index, section in enumerate(day.sections):
-                connection.execute(
-                    "INSERT INTO sections VALUES (?, ?, ?, ?)",
-                    (section.id, day.date.isoformat(), index, section.title),
-                )
-                connection.executemany(
-                    "INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        (
-                            task.id,
-                            section.id,
-                            position,
-                            task.title,
-                            str(task.available) if task.available is not None else None,
-                            str(task.earned),
-                            task.minutes,
-                            int(task.checked),
-                        )
-                        for position, task in enumerate(section.tasks)
-                    ),
-                )
 
     def delete(self, expected: Day) -> None:
-        with self.connect() as connection, connection:
-            connection.execute("BEGIN IMMEDIATE")
+        with self.transaction() as connection:
             self._expect_day(connection, expected.date, expected)
             connection.execute(
                 "DELETE FROM days WHERE date = ?", (expected.date.isoformat(),)
