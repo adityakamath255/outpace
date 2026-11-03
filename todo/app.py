@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
+from typing import NamedTuple
 
 from platformdirs import user_data_path
 from rich.table import Table
@@ -104,6 +105,75 @@ def schedule_status(intervals: tuple[Interval, ...], now: datetime) -> str:
     return "Between intervals"
 
 
+MAX_MESSAGES = 5
+
+
+class Change(NamedTuple):
+    previous: Day
+    previous_persisted: bool
+    description: str
+    task_id: str | None
+
+
+def progress_change(before: Task, after: Task) -> str:
+    if after.available is None:
+        return f"marked {after.title} {'done' if after.checked else 'not done'}"
+    available = number(after.available)
+    return (
+        f"changed {after.title} from {number(before.earned)}/{available} "
+        f"to {number(after.earned)}/{available}"
+    )
+
+
+# keys use Textual's key displays so tests can check every binding is listed
+HELP = (
+    (
+        "Tasks",
+        (
+            ("j ↓", "next task"),
+            ("k ↑", "previous task"),
+            ("g", "first task"),
+            ("G", "last task"),
+            ("⏎", "set earned points; toggle an unscored task"),
+            ("space", "toggle done"),
+            ("+ -", "earned points up or down by one"),
+            ("a", "add a task to the selected section"),
+            ("e", "edit task"),
+            ("dd del", "delete task"),
+            ("J K", "move task down or up within its section"),
+            ("u", "undo"),
+        ),
+    ),
+    ("Sections", (("r", "rename section"),)),
+    (
+        "Days",
+        (
+            ("[ ]", "previous or next day"),
+            ("t", "today"),
+            ("^d", "open a date"),
+            ("c", "replace this list with another day's"),
+            ("s", "edit schedule"),
+        ),
+    ),
+    (
+        "Panes",
+        (
+            ("h ←", "task pane"),
+            ("l →", "analytics pane; j k scroll it"),
+        ),
+    ),
+    (
+        "Dialogs",
+        (
+            ("⏎", "save"),
+            ("esc", "cancel"),
+            ("tab", "next field"),
+        ),
+    ),
+    ("App", (("?", "show this list"), ("q ^q", "quit"))),
+)
+
+
 class TaskList(OptionList):
     BINDINGS = [
         Binding("j", "cursor_down", "Down", show=False),
@@ -111,13 +181,34 @@ class TaskList(OptionList):
         Binding("g", "first", "First", show=False),
         Binding("G", "last", "Last", show=False),
     ]
+    delete_pending = False
+
+    # dd deletes; Textual bindings cannot express chords, so any other key or
+    # leaving the list cancels a pending d
+    async def on_key(self, event: events.Key) -> None:
+        if event.key != "d":
+            self.delete_pending = False
+            return
+        event.stop()
+        if self.delete_pending:
+            self.delete_pending = False
+            await self.run_action("app.delete")
+        else:
+            self.delete_pending = True
+
+    def on_blur(self) -> None:
+        self.delete_pending = False
 
 
-class AnalyticsPane(VerticalScroll):
+class VimScroll(VerticalScroll):
     BINDINGS = [
         Binding("j", "scroll_down", "Scroll down", show=False),
         Binding("k", "scroll_up", "Scroll up", show=False),
     ]
+
+
+class AnalyticsPane(VimScroll):
+    pass
 
 
 class FormSelect(Select):
@@ -226,7 +317,9 @@ class PointsEditor(ModalScreen):
                 self.edited_task, earned=points(self.query_one("#earned", Input).value)
             )
             self.app.save_change(
-                self.app.day.put_task(task, self.section_id), task_id=task.id
+                self.app.day.put_task(task, self.section_id),
+                progress_change(self.edited_task, task),
+                task_id=task.id,
             )
         except (ValueError, sqlite3.Error, OSError) as error:
             self.query_one("#error", Static).update(str(error))
@@ -314,7 +407,8 @@ class TaskEditor(ModalScreen):
                 day = replace(day, sections=day.sections + (section,))
                 section_id = section.id
             day = day.put_task(task, section_id)
-            self.app.save_change(day, task_id=task.id)
+            change = f"{'edited' if self.edited_task else 'added'} {task.title}"
+            self.app.save_change(day, change, task_id=task.id)
         except (ValueError, sqlite3.Error, OSError) as error:
             self.query_one("#error", Static).update(str(error))
             return
@@ -368,48 +462,41 @@ class SectionEditor(ModalScreen):
     @on(Input.Submitted)
     def action_save(self) -> None:
         try:
+            section_id = self.query_one("#section", Select).value
             day = self.app.day.rename_section(
-                self.query_one("#section", Select).value,
-                self.query_one("#section-name", Input).value,
+                section_id, self.query_one("#section-name", Input).value
             )
-            self.app.save_change(day)
+            old, new = (
+                next(s.title for s in d.sections if s.id == section_id)
+                for d in (self.app.day, day)
+            )
+            self.app.save_change(day, f"renamed section {old} to {new}")
         except (ValueError, sqlite3.Error, OSError) as error:
             self.query_one("#error", Static).update(str(error))
             return
         self.dismiss()
 
 
-class DeleteTask(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel"), ("y", "delete", "Delete")]
-
-    def __init__(self, task: Task):
-        super().__init__()
-        self.task_to_delete = task
+class HelpScreen(ModalScreen):
+    BINDINGS = [
+        Binding("escape,question_mark,q", "dismiss", "Close"),
+    ]
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(classes="dialog", id="delete-dialog"):
-            yield Label("Delete task?", classes="dialog-title")
-            yield Static(self.task_to_delete.title, markup=False)
-            yield Static(
-                "You can undo this until you switch days or quit.", classes="muted"
-            )
-            yield Static("", id="error", markup=False)
-            with DialogButtons():
-                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
-                yield Button(
-                    "Delete (y)", id="delete", variant="error", action="screen.delete"
-                )
+        table = Table.grid(padding=(0, 2))
+        table.add_column(no_wrap=True)
+        table.add_column()
+        for index, (group, rows) in enumerate(HELP):
+            if index:
+                table.add_row()
+            table.add_row(Text(group, style="bold magenta"))
+            for keys, description in rows:
+                table.add_row(Text(keys, style="bold blue"), description)
+        with VimScroll(classes="dialog", id="help-dialog"):
+            yield Static(table)
 
     def on_mount(self) -> None:
-        self.query_one("#cancel", Button).focus()
-
-    def action_delete(self) -> None:
-        try:
-            self.app.save_change(self.app.day.remove_task(self.task_to_delete.id))
-        except (ValueError, sqlite3.Error, OSError) as error:
-            self.query_one("#error", Static).update(str(error))
-            return
-        self.dismiss()
+        self.query_one(VimScroll).focus()
 
 
 class IntervalRow(Horizontal):
@@ -513,7 +600,7 @@ class ScheduleEditor(ModalScreen):
                 )
             )
             day = replace(self.app.day, intervals=intervals)
-            self.app.save_change(day)
+            self.app.save_change(day, "changed the schedule")
         except (ValueError, sqlite3.Error, OSError) as error:
             self.query_one("#error", Static).update(str(error))
             return
@@ -567,7 +654,10 @@ class ReuseDay(ModalScreen):
             source = self.app.store.load(self.query_one(Select).value)
             if source is None:
                 raise ValueError("That day's list no longer exists. Choose another.")
-            self.app.save_change(source.copy_to(self.list_date))
+            self.app.save_change(
+                source.copy_to(self.list_date),
+                f"replaced the list with {source.date.isoformat()}'s",
+            )
         except (ValueError, sqlite3.Error, OSError) as error:
             self.query_one("#error", Static).update(str(error))
             return
@@ -580,13 +670,17 @@ class TodoApp(App):
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
         Binding("a", "add", "Add"),
-        Binding("c", "reuse", "Reuse"),
+        Binding("c", "reuse", "Reuse", show=False),
         Binding("e", "edit", "Edit"),
         Binding("r", "rename_section", "Rename section", show=False),
-        Binding("s", "schedule", "Schedule"),
+        Binding("s", "schedule", "Schedule", show=False),
         Binding("space", "complete", "Done"),
-        Binding("d,delete", "delete", "Delete"),
+        Binding("plus", "step(1)", "Points", key_display="+/-"),
+        Binding("minus", "step(-1)", "Points down", show=False),
+        # TaskList handles the dd chord before bindings see d
+        Binding("delete", "delete", "Delete", key_display="dd"),
         Binding("u", "undo", "Undo"),
+        Binding("question_mark", "help", "Keys"),
         Binding("J", "move(1)", "Move down", show=False),
         Binding("K", "move(-1)", "Move up", show=False),
         Binding("h,left", "tasks", "Tasks", show=False),
@@ -603,7 +697,16 @@ class TodoApp(App):
         super().__init__(ansi_color=True)
         self.store = store
         self._load_day(list_date)
-        self.history: list[tuple[Day, bool]] = []
+        self.history: list[Change] = []
+
+    def on_notify(self) -> None:
+        # textual has no public limit on toasts, and this handler runs before
+        # textual's own adds the new one, so trim once the message is handled
+        self.call_next(self.trim_messages)
+
+    def trim_messages(self) -> None:
+        for notification in list(self._notifications)[:-MAX_MESSAGES]:
+            self._unnotify(notification)
 
     def _load_day(self, list_date: date) -> None:
         saved = self.store.load(list_date)
@@ -666,7 +769,6 @@ class TodoApp(App):
                 yield Static("", id="schedule", markup=False)
                 yield Static("", id="estimates", markup=False)
                 yield Static("", id="details", markup=False)
-        yield Static("", id="status", markup=False)
         yield Footer(compact=True)
 
     def on_mount(self) -> None:
@@ -680,29 +782,13 @@ class TodoApp(App):
         self.default_screen.set_class(event.size.width < 60, "narrow")
 
     def on_descendant_focus(self) -> None:
-        self.refresh_navigation()
-
-    def refresh_navigation(self) -> None:
         focused = self.focused
         ancestors = (focused, *focused.ancestors) if focused is not None else ()
         pane = next(
             (w for w in ancestors if isinstance(w, (TaskList, AnalyticsPane))), None
         )
-        hints = ["h/l panes"]
-        if isinstance(pane, TaskList):
-            self.show_analytics(False)
-            hints.append("j/k select")
-            if selected := self.selected():
-                hints.append(
-                    "Enter points"
-                    if selected[1].available is not None
-                    else "Enter done"
-                )
-        elif isinstance(pane, AnalyticsPane):
-            self.show_analytics(True)
-            hints.append("j/k scroll")
-        hints.extend(("r section", "J/K move"))
-        self.query_one("#status", Static).update(" · ".join(hints))
+        if pane is not None:
+            self.show_analytics(isinstance(pane, AnalyticsPane))
 
     def show_analytics(self, show: bool) -> None:
         self.default_screen.set_class(show, "analytics")
@@ -895,7 +981,6 @@ class TodoApp(App):
             text.append(f"{missing} without an estimate", style="dim")
         self.query_one("#estimates", Static).update(text)
         self.query_one("#estimates", Static).display = bool(estimates)
-        self.refresh_navigation()
 
     @on(OptionList.OptionHighlighted, "#tasks")
     def highlighted(self) -> None:
@@ -911,14 +996,24 @@ class TodoApp(App):
             else:
                 self.push_screen(PointsEditor(task, section.id))
 
-    def save_change(self, day: Day, task_id: str | None = None) -> None:
+    def save_change(
+        self, day: Day, description: str, task_id: str | None = None
+    ) -> None:
         if day == self.day:
             return
         self.store.save(day, expected=self.day if self.persisted else None)
-        self.history.append((self.day, self.persisted))
+        self.history.append(Change(self.day, self.persisted, description, task_id))
         self.day = day
         self.persisted = True
         self.redraw(task_id)
+
+    def save_or_notify(
+        self, day: Day, description: str, task_id: str | None = None
+    ) -> None:
+        try:
+            self.save_change(day, description, task_id)
+        except (ValueError, sqlite3.Error, OSError) as error:
+            self.notify(str(error), title="Could not save", severity="error", timeout=8)
 
     def action_add(self) -> None:
         selected = self.selected()
@@ -953,50 +1048,56 @@ class TodoApp(App):
 
     def action_complete(self) -> None:
         if selected := self.selected():
-            section, task = selected
-            try:
-                self.save_change(
-                    self.day.put_task(task.toggle(), section.id),
-                    task_id=task.id,
-                )
-            except (ValueError, sqlite3.Error, OSError) as error:
-                self.notify(
-                    str(error), title="Could not save", severity="error", timeout=8
-                )
+            self.save_progress(*selected, selected[1].toggle())
+
+    def action_step(self, delta: int) -> None:
+        if selected := self.selected():
+            self.save_progress(*selected, selected[1].step(delta))
+
+    def save_progress(self, section: Section, before: Task, after: Task) -> None:
+        self.save_or_notify(
+            self.day.put_task(after, section.id),
+            progress_change(before, after),
+            task_id=after.id,
+        )
 
     def action_delete(self) -> None:
         if selected := self.selected():
-            self.push_screen(DeleteTask(selected[1]))
+            task = selected[1]
+            self.save_or_notify(
+                self.day.remove_task(task.id), f"deleted {task.title}", task_id=task.id
+            )
 
     def action_move(self, offset: int) -> None:
         if selected := self.selected():
-            try:
-                self.save_change(
-                    self.day.move_task(selected[1].id, offset),
-                    task_id=selected[1].id,
-                )
-            except (ValueError, sqlite3.Error, OSError) as error:
-                self.notify(
-                    str(error), title="Could not save", severity="error", timeout=8
-                )
+            task = selected[1]
+            self.save_or_notify(
+                self.day.move_task(task.id, offset),
+                f"moved {task.title} {'down' if offset > 0 else 'up'}",
+                task_id=task.id,
+            )
+
+    def action_help(self) -> None:
+        self.push_screen(HelpScreen())
 
     def action_undo(self) -> None:
         if not self.history:
             self.notify("Nothing to undo.", timeout=2)
             return
-        previous, was_persisted = self.history[-1]
+        change = self.history[-1]
         try:
-            if was_persisted:
-                self.store.save(previous, expected=self.day)
+            if change.previous_persisted:
+                self.store.save(change.previous, expected=self.day)
             else:
                 self.store.delete(self.day)
         except (ValueError, sqlite3.Error, OSError) as error:
             self.notify(str(error), title="Could not undo", severity="error", timeout=8)
             return
         self.history.pop()
-        self.day = previous
-        self.persisted = was_persisted
-        self.redraw()
+        self.day = change.previous
+        self.persisted = change.previous_persisted
+        self.redraw(change.task_id)
+        self.notify(f"Undid: {change.description}", timeout=4, markup=False)
 
     def action_tasks(self) -> None:
         self.show_analytics(False)

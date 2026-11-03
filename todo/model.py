@@ -79,6 +79,13 @@ class Task:
             return replace(self, checked=not self.checked)
         return replace(self, earned=Fraction(0) if self.complete else self.available)
 
+    def step(self, delta: int) -> Task:
+        if self.available is None:
+            return replace(self, checked=delta > 0)
+        return replace(
+            self, earned=min(max(self.earned + delta, Fraction(0)), self.available)
+        )
+
 
 @dataclass(frozen=True)
 class Section:

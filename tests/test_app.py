@@ -72,7 +72,7 @@ def app(tmp_path):
     return TodoApp(store, day.date)
 
 
-@pytest.mark.parametrize("key", ("a", "e", "enter", "d"))
+@pytest.mark.parametrize("key", ("a", "e", "enter"))
 def test_task_dialogs_open(app, key):
     async def open_dialog():
         async with app.run_test(size=(110, 45)) as pilot:
@@ -241,7 +241,6 @@ def test_task_changes_save_and_undo(app):
             assert app.day == before_move
 
             assert await pilot.click(footer_action(app, "delete"))
-            assert await pilot.click("#delete")
             assert all(task.id != added.id for _, task in app.day.tasks())
             await pilot.press("u")
             assert app.day == before_move
@@ -319,36 +318,10 @@ def test_analytics_scrolls_with_vim_keys_without_changing_task_selection(app):
     asyncio.run(scroll_analytics())
 
 
-def test_pane_hints_keep_shared_shortcuts_and_only_change_local_controls(app):
-    async def check_hints():
-        async with app.run_test() as pilot:
-            status = app.query_one("#status", Static)
-            task_hints = str(status.content).split(" · ")
-            assert "j/k select" in task_hints
-            assert "Enter points" in task_hints
-            await pilot.press("l")
-            analytics_hints = str(status.content).split(" · ")
-            assert "j/k scroll" in analytics_hints
-            assert "s schedule" not in analytics_hints
-            for shared in ("h/l panes", "r section", "J/K move"):
-                assert shared in task_hints and shared in analytics_hints
-            assert task_hints.index("h/l panes") == analytics_hints.index("h/l panes")
-            app.query_one("#edit-schedule", Button).focus()
-            await pilot.pause()
-            assert str(status.content).split(" · ") == analytics_hints
-            app.query_one("#choose-day", Button).focus()
-            await pilot.pause()
-            assert "j/k" not in str(status.content)
-            assert "Enter points" not in str(status.content)
-
-    asyncio.run(check_hints())
-
-
-def test_enter_hint_matches_unscored_task_completion(app):
+def test_enter_completes_an_unscored_task_without_a_dialog(app):
     async def complete_unscored_task():
         async with app.run_test() as pilot:
             await pilot.press("a", *"Remember", "enter")
-            assert "Enter done" in str(app.query_one("#status", Static).content)
             await pilot.press("enter")
             assert app.selected()[1].checked
             assert not isinstance(app.screen, ModalScreen)
@@ -430,7 +403,8 @@ def test_total_estimate_uses_hours_and_minutes(app):
     async def read_estimate():
         async with app.run_test():
             app.save_change(
-                app.day.put_task(Task("Read", None, minutes=190), section.id)
+                app.day.put_task(Task("Read", None, minutes=190), section.id),
+                "added Read",
             )
             assert "3:40 across 2 tasks" in str(
                 app.query_one("#estimates", Static).content
@@ -479,19 +453,6 @@ def test_oversized_estimate_keeps_form_and_explains_the_limit(app):
             assert Store(app.store.path).load(original.date) == original
 
     asyncio.run(reject_estimate())
-
-
-def test_saving_points_keeps_navigation_hints_visible(app):
-    async def edit_points():
-        async with app.run_test() as pilot:
-            hints = str(app.query_one("#status", Static).content)
-            await pilot.press("enter")
-            app.screen.query_one("#earned", Input).value = "2.5"
-            await pilot.press("enter")
-            assert next(app.day.tasks())[1].earned == points("2.5")
-            assert str(app.query_one("#status", Static).content) == hints
-
-    asyncio.run(edit_points())
 
 
 def test_dialog_buttons_support_arrows_and_vim_without_changing_input_keys(app):
@@ -595,25 +556,78 @@ def test_section_rename_keeps_focused_actions_reachable_in_a_short_terminal(app)
     asyncio.run(rename_in_short_terminal())
 
 
-def test_delete_has_a_two_key_confirmation_and_cancel_stays_the_default(app):
+def test_dd_deletes_without_a_dialog_and_undo_names_the_change(app, monkeypatch):
     original = app.day
+    messages = []
+    monkeypatch.setattr(
+        app, "notify", lambda message, **kwargs: messages.append(message)
+    )
 
     async def delete_and_undo():
         async with app.run_test() as pilot:
-            await pilot.press("d")
-            assert app.focused.id == "cancel"
-            await pilot.press("enter")
-            assert not isinstance(app.screen, ModalScreen)
+            await pilot.press("d", "k", "d")
             assert app.day == original
-            await pilot.press("d", "y")
+            await pilot.press("d", "d")
             assert not isinstance(app.screen, ModalScreen)
             assert not list(app.day.tasks())
             assert app.store.load(original.date) == app.day
             await pilot.press("u")
             assert app.day == original
             assert app.store.load(original.date) == original
+            assert messages == ["Undid: deleted Practice"]
+
+            await pilot.press("a", *"Second", "enter", "k")
+            practice = app.selected()[1]
+            await pilot.press("d", "d")
+            assert app.selected()[1].title == "Second"
+            await pilot.press("u")
+            assert app.selected()[1] == practice
 
     asyncio.run(delete_and_undo())
+
+
+def test_plus_and_minus_step_points_and_undo_names_the_change(app, monkeypatch):
+    messages = []
+    monkeypatch.setattr(
+        app, "notify", lambda message, **kwargs: messages.append(message)
+    )
+
+    async def step():
+        async with app.run_test() as pilot:
+            await pilot.press("plus")
+            assert app.selected()[1].earned == 3
+            await pilot.press("minus", "minus", "minus", "minus")
+            assert app.selected()[1].earned == 0
+            assert len(app.history) == 4
+            await pilot.press("u")
+            assert app.selected()[1].earned == 1
+            assert messages == ["Undid: changed Practice from 1/5 to 0/5"]
+
+    asyncio.run(step())
+
+
+def test_help_lists_every_key_binding(app):
+    from todo.app import HELP, AnalyticsPane, TaskList
+
+    documented = {key for _, rows in HELP for keys, _ in rows for key in keys.split()}
+    bindings = [*TodoApp.BINDINGS, *TaskList.BINDINGS, *AnalyticsPane.BINDINGS]
+    displays = {
+        app.get_key_display(binding.with_key(key))
+        for binding in bindings
+        for key in binding.key.split(",")
+    }
+    assert displays <= documented
+
+    async def open_and_close():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("question_mark")
+            assert isinstance(app.screen, ModalScreen)
+            await pilot.press("a")
+            assert not list(app.screen.query("#title"))
+            await pilot.press("escape")
+            assert not isinstance(app.screen, ModalScreen)
+
+    asyncio.run(open_and_close())
 
 
 def test_ended_schedule_is_explained_instead_of_showing_zero_remaining(
@@ -1000,3 +1014,16 @@ def test_schedule_controls_fit_their_labels(app, size):
                 assert clock.content_size.width >= len(clock.value) + 1
 
     asyncio.run(check_labels())
+
+
+def test_messages_stack_up_to_five_and_drop_the_oldest(app):
+    async def undo_repeatedly():
+        async with app.run_test(notifications=True) as pilot:
+            await pilot.press("plus", "plus", "plus", "u", "u", "u", "u", "u", "u")
+            await pilot.pause()
+            toasts = [str(toast.render()) for toast in app.screen.query("Toast")]
+            assert len(toasts) == 5
+            assert "Nothing to undo." in toasts[-1]
+            assert all("4/5 to 5/5" not in toast for toast in toasts)
+
+    asyncio.run(undo_repeatedly())

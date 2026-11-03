@@ -141,15 +141,6 @@ Screen {
     margin-bottom: 0;
 }
 
-#status {
-    height: 1;
-    margin: 0 1;
-    color: ansi_default;
-    text-wrap: nowrap;
-    text-overflow: ellipsis;
-    text-style: dim;
-}
-
 Footer {
     background: ansi_default;
 }
@@ -343,4 +334,13 @@ ScheduleEditor.narrow .interval-row {
 ScheduleEditor.narrow .interval-row Checkbox,
 ScheduleEditor.narrow .interval-row Button {
     margin-top: 0;
+}
+
+Toast {
+    width: auto;
+    max-width: 90%;
+    margin-top: 0;
+    padding: 0 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }

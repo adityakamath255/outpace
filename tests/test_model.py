@@ -279,3 +279,13 @@ def test_unscored_completion_does_not_award_points():
     task = Task("Remember", None).toggle()
     assert task.complete
     assert score((task,)) == (0, 0)
+
+
+def test_step_changes_earned_points_by_one_within_bounds():
+    task = Task("Read", points("2.5"), points("2"))
+    assert task.step(1).earned == points("2.5")
+    assert task.step(1).step(1).earned == points("2.5")
+    assert task.step(-1).earned == 1
+    assert Task("Read", points("3")).step(-1).earned == 0
+    assert Task("Remember", None).step(1).checked
+    assert not Task("Remember", None, checked=True).step(-1).checked
