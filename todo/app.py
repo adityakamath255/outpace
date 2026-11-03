@@ -1,12 +1,14 @@
 import argparse
+import re
 import sqlite3
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from fractions import Fraction
 from pathlib import Path
-from typing import NamedTuple
+from typing import Literal, NamedTuple
 
 from platformdirs import user_data_path
+from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
 from rich.table import Table
 from rich.text import Text
 from textual import events, on
@@ -45,52 +47,116 @@ from .model import (
     time_progress,
 )
 
+# failures shown to the user while the draft or the list stays as it was
+RECOVERABLE = (ValueError, sqlite3.Error, OSError)
 
-def task_row(marker: str, title: str, points: str, estimate: str, style: str) -> Table:
-    table = Table.grid(padding=(0, 1), collapse_padding=True, expand=True)
-    table.add_column(width=1)
-    table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
-    table.add_column(width=9, justify="right", no_wrap=True, overflow="ellipsis")
-    table.add_column(width=6, justify="right", no_wrap=True, overflow="ellipsis")
-    table.add_row(
-        Text(marker, style=style),
-        Text(title),
-        Text(points, style=style),
-        Text(estimate, style="dim"),
-    )
-    return table
+# marker, earned, available, estimate, time per point; the title takes the rest
+CELL_WIDTHS = (1, 5, 4, 6, 8)
+FIXED_WIDTH = sum(CELL_WIDTHS) + len(CELL_WIDTHS)
+BAR_WIDTH = 32
+MAX_MESSAGES = 5
 
 
-def progress_text(
-    label: str, value: str, progress: Fraction | None, color: str
-) -> Text:
+def units(value: str) -> Text:
+    """Dims the unit letters of durations like 3h40m so the digits stand out."""
     text = Text()
-    text.append(f"{label:<8}", style="dim")
-    text.append(value, style=f"bold {color}")
-    if progress is not None:
-        filled = int(progress * 20)
-        text.append("\n" + "━" * filled, style=color)
-        text.append("─" * (20 - filled), style="dim")
-        text.append(f" {percentage(progress):>6}%", style=color)
+    position = 0
+    for match in re.finditer(r"(?<=\d)[hms]", value):
+        text.append(value[position : match.start()])
+        text.append(match.group(), style="dim")
+        position = match.end()
+    text.append(value[position:])
     return text
 
 
-def section_row(section: Section, total: Fraction) -> Table:
+def row(cells: tuple[Text | str, ...], title: Text | str) -> Table:
+    table = Table.grid(padding=(0, 1), expand=True)
+    for width in CELL_WIDTHS:
+        table.add_column(width=width, justify="right", no_wrap=True)
+    table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
+    table.add_row(*cells, title)
+    return table
+
+
+def task_row(task: Task) -> Table:
+    if task.complete:
+        marker, color = "✓", "green"
+    elif task.earned:
+        marker, color = "~", "blue"
+    else:
+        marker, color = "", ""
+    scored = task.available is not None
+    cells = (
+        Text(marker, style=color),
+        Text(number(task.earned) if scored else "", style=color),
+        number(task.available) if task.available is not None else "",
+        units(duration(task.minutes * 60)) if task.minutes else "",
+        units(per_point(task.minutes * 60, task.available))
+        if task.minutes and task.available is not None
+        else "",
+    )
+    return row(cells, Text(task.title))
+
+
+def section_label(section: Section) -> str:
+    return f"section {section.title}" if section.title else "an untitled section"
+
+
+def section_summary(section: Section, total: Fraction) -> tuple[str, ...]:
+    """The summary parts of a section's rule, most important first."""
+    if not section.tasks:
+        return ()
     earned, available = score(section.tasks)
     if available:
-        summary = (
-            f"{number(earned)}/{number(available)}  "
-            f"{percentage(ratio(available, total))}% of total"
-        )
-    else:
-        summary = (
-            f"{sum(task.complete for task in section.tasks)}/{len(section.tasks)} done"
-        )
-    table = Table.grid(padding=(0, 1), expand=True)
-    table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
-    table.add_column(justify="right", no_wrap=True, overflow="ellipsis")
-    table.add_row(Text(section.title, style="bold magenta"), Text(summary, style="dim"))
-    return table
+        share = f"{percentage(ratio(available, total))}% of total"
+        return f"{number(earned)}/{number(available)}", share
+    return (
+        f"{sum(task.complete for task in section.tasks)}/{len(section.tasks)} done",
+    )
+
+
+class SectionRule:
+    """A rule line that starts a section: ── title ─────── summary ──"""
+
+    def __init__(self, section: Section, total: Fraction):
+        self.title = section.title
+        self.summary = section_summary(section, total)
+
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> RenderResult:
+        width = options.max_width
+        left = Text("──", style="dim")
+        if self.title:
+            left.append(" ")
+            left.append(self.title, style="bold")
+            left.append(" ")
+        # the title identifies the row, so the summary gives way first
+        for count in range(len(self.summary), -1, -1):
+            parts = "  ".join(self.summary[:count])
+            right = Text(f" {parts} ──" if parts else "──", style="dim")
+            if left.cell_len + right.cell_len < width:
+                break
+        left.truncate(max(width - right.cell_len - 1, 3))
+        fill = max(width - left.cell_len - right.cell_len, 1)
+        yield left + Text("─" * fill, style="dim") + right
+
+
+def meter(
+    label: str, value: Text, progress: Fraction | None, color: str, width: int
+) -> Text:
+    text = Text()
+    text.append(f"{label:<8}", style="dim")
+    text.append_text(value)
+    if progress is None:
+        return text
+    share = f" {percentage(progress)}%"
+    bar = max(width - len(share), 1)
+    filled = min(int(progress * bar), bar)
+    text.append("\n" + "━" * filled, style=color)
+    text.append("─" * (bar - filled), style="dim")
+    text.append(share, style=color)
+    return text
 
 
 def schedule_status(intervals: tuple[Interval, ...], now: datetime) -> str:
@@ -105,14 +171,85 @@ def schedule_status(intervals: tuple[Interval, ...], now: datetime) -> str:
     return "Between intervals"
 
 
-MAX_MESSAGES = 5
+def schedule_blocks(
+    day: Day, now: datetime, earned: Fraction, available: Fraction, width: int
+) -> list[RenderableType]:
+    elapsed, total = time_progress(day.intervals, now)
+    progress, time_ratio = ratio(earned, available), ratio(elapsed, total)
+    value = units(duration(elapsed)) + Text(" / ") + units(duration(total))
+    status = Text()
+    if progress is not None and time_ratio is not None:
+        difference = progress - time_ratio
+        # the sign carries the meaning; colour only backs it up
+        if difference > 0:
+            style, word = "bold blue", "ahead"
+        elif difference < 0:
+            style, word = "bold yellow", "behind"
+        else:
+            style, word = "bold", "on pace"
+        status.append(f"{percentage(difference, signed=True)} pp {word}\n", style=style)
+    status.append(schedule_status(day.intervals, now).lower())
+    if not total:
+        remaining = Text("n/a")
+    elif elapsed == total:
+        remaining = Text("ended")
+    else:
+        remaining = units(per_point(total - elapsed, available - earned))
+    pace = Table.grid(padding=(0, 2))
+    pace.add_column(style="dim", no_wrap=True)
+    pace.add_column(no_wrap=True)
+    pace.add_row("time / point", units(per_point(total, available)))
+    pace.add_row("remaining / point", remaining)
+    intervals = Text()
+    for index, interval in enumerate(day.intervals):
+        if index:
+            intervals.append("  ")
+        intervals.append(f"{interval.start:%H:%M}-{interval.end:%H:%M}")
+        if (interval.start.date() - day.date).days:
+            intervals.append(" next day", style="dim")
+    return [meter("time", value, time_ratio, "cyan", width), status, pace, intervals]
+
+
+def stats(day: Day, now: datetime, width: int, full_title: str | None) -> Group:
+    width = min(width, BAR_WIDTH)
+    tasks = [task for _, task in day.tasks()]
+    earned, available = score(tasks)
+    value = Text(f"{number(earned)} / {number(available)}", style="bold")
+    blocks: list[RenderableType] = [
+        meter("points", value, ratio(earned, available), "green", width)
+    ]
+    if day.intervals:
+        blocks += schedule_blocks(day, now, earned, available, width)
+    else:
+        blocks.append(Text("no schedule · s to set one", style="dim"))
+    estimates = [task.minutes for task in tasks if task.minutes is not None]
+    if estimates:
+        text = units(duration(sum(estimates) * 60))
+        text.append(f" estimated across {len(estimates)} tasks")
+        missing = sum(
+            task.minutes is None and task.available is not None for task in tasks
+        )
+        if missing:
+            text.append(f"\n{missing} scored without an estimate", style="dim")
+        blocks.append(text)
+    if full_title is not None:
+        blocks.append(Text(full_title, style="bold"))
+    spaced: list[RenderableType] = []
+    for block in blocks:
+        if spaced:
+            spaced.append(Text())
+        spaced.append(block)
+    return Group(*spaced)
 
 
 class Change(NamedTuple):
     previous: Day
     previous_persisted: bool
+    # the stored day this change produced; undo applies only while it is current
+    after: Day
     description: str
-    task_id: str | None
+    # the row to select after undoing: a task or section id
+    subject: str | None
 
 
 def progress_change(before: Task, after: Task) -> str:
@@ -128,23 +265,24 @@ def progress_change(before: Task, after: Task) -> str:
 # keys use Textual's key displays so tests can check every binding is listed
 HELP = (
     (
-        "Tasks",
+        "Tasks and sections",
         (
-            ("j ↓", "next task"),
-            ("k ↑", "previous task"),
-            ("g", "first task"),
-            ("G", "last task"),
-            ("⏎", "set earned points; toggle an unscored task"),
+            ("j ↓", "next row"),
+            ("k ↑", "previous row"),
+            ("g", "first row"),
+            ("G", "last row"),
+            ("⏎", "set points, toggle unscored, or rename section"),
             ("space", "toggle done"),
             ("+ -", "earned points up or down by one"),
-            ("a", "add a task to the selected section"),
-            ("e", "edit task"),
-            ("dd del", "delete task"),
-            ("J K", "move task down or up within its section"),
-            ("u", "undo"),
+            ("a", "add tasks to the selected section"),
+            ("e", "edit task, or rename section"),
+            ("o", "new untitled section below"),
+            ("r", "rename section; blank for untitled"),
+            ("dd del", "delete task, or section with its tasks"),
+            ("J K", "move down or up, across sections"),
+            ("u", "undo, kept per day until you quit"),
         ),
     ),
-    ("Sections", (("r", "rename section"),)),
     (
         "Days",
         (
@@ -153,13 +291,6 @@ HELP = (
             ("^d", "open a date"),
             ("c", "replace this list with another day's"),
             ("s", "edit schedule"),
-        ),
-    ),
-    (
-        "Panes",
-        (
-            ("h ←", "task pane"),
-            ("l →", "analytics pane; j k scroll it"),
         ),
     ),
     (
@@ -207,10 +338,6 @@ class VimScroll(VerticalScroll):
     ]
 
 
-class AnalyticsPane(VimScroll):
-    pass
-
-
 class FormSelect(Select):
     # the expanded menu handles Enter before this binding is considered
     BINDINGS = [Binding("enter", "screen.save", "Save", show=False)]
@@ -244,7 +371,7 @@ class DayPicker(ModalScreen):
                 self.initial_date.isoformat(), id="list-date", select_on_focus=True
             )
             yield Static(
-                "A new date starts an empty list. Undo resets when you switch days.",
+                "A new date starts an empty list.",
                 classes="muted",
             )
             yield Static("", id="error", markup=False)
@@ -272,7 +399,7 @@ class DayPicker(ModalScreen):
             return
         try:
             self.app.switch_day(list_date)
-        except (ValueError, sqlite3.Error, OSError) as error:
+        except RECOVERABLE as error:
             self.query_one("#error", Static).update(str(error))
             return
         self.dismiss()
@@ -291,7 +418,7 @@ class PointsEditor(ModalScreen):
             yield Label("Earned points", classes="dialog-title")
             yield Static(self.edited_task.title, markup=False, classes="muted")
             yield Label(
-                f"Available: {number(self.edited_task.available)}",
+                f"Earned, out of {number(self.edited_task.available)}",
                 classes="field-label",
             )
             yield Input(
@@ -319,159 +446,136 @@ class PointsEditor(ModalScreen):
             self.app.save_change(
                 self.app.day.put_task(task, self.section_id),
                 progress_change(self.edited_task, task),
-                task_id=task.id,
+                task.id,
             )
-        except (ValueError, sqlite3.Error, OSError) as error:
+        except RECOVERABLE as error:
             self.query_one("#error", Static).update(str(error))
             return
         self.dismiss()
 
 
 class TaskEditor(ModalScreen):
-    BINDINGS = [("escape", "dismiss", "Cancel")]
+    """Adds tasks one after another until closed, or edits one task."""
 
-    def __init__(self, day: Day, task: Task | None, section_id: str):
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, task: Task | None, section: Section):
         super().__init__()
-        self.day = day
         self.edited_task = task
-        self.section_id = section_id
+        self.section = section
 
     def compose(self) -> ComposeResult:
         task = self.edited_task
-        with VerticalScroll(classes="dialog", id="task-dialog"):
-            yield Label("Edit task" if task else "Add task", classes="dialog-title")
-            yield Label("Title", classes="field-label")
-            yield Input(task.title if task else "", id="title")
-            with Horizontal(classes="fields"):
-                with Vertical():
-                    yield Label("Earned points", classes="field-label")
-                    yield Input(number(task.earned) if task else "0", id="earned")
-                with Vertical():
-                    yield Label("Available points", classes="field-label")
-                    yield Input(
-                        number(task.available)
-                        if task and task.available is not None
-                        else "",
-                        placeholder="Blank = unscored",
-                        id="available",
-                    )
-            yield Label("Estimated minutes (optional)", classes="field-label")
-            yield Input(
-                str(task.minutes) if task and task.minutes is not None else "",
-                id="minutes",
-            )
-            yield Label("Section (Space/Down to choose)", classes="field-label")
-            yield FormSelect(
-                [(Text(s.title), s.id) for s in self.day.sections],
-                value=self.section_id,
-                allow_blank=False,
-                id="section",
-            )
-            yield Label("Or create a section", classes="field-label")
-            yield Input(placeholder="New section name (optional)", id="new-section")
-            yield Static("", id="error", markup=False)
-            with DialogButtons():
-                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
-                yield Button(
-                    "Save (Enter)",
-                    id="save",
-                    variant="primary",
-                    action="screen.save",
+        if task:
+            heading = "Edit task"
+            hint = "⏎ save · esc cancel · blank points for unscored"
+        else:
+            heading = f"Add tasks to {section_label(self.section)}"
+            hint = "⏎ add and start the next · esc close · blank points for unscored"
+        with Vertical(classes="dialog", id="task-dialog"):
+            yield Label(heading, classes="dialog-title", markup=False)
+            with Horizontal(id="task-fields"):
+                yield Label("pts")
+                yield Input(
+                    number(task.available)
+                    if task and task.available is not None
+                    else "",
+                    id="available",
+                    compact=True,
+                    select_on_focus=False,
                 )
+                yield Label("min")
+                yield Input(
+                    str(task.minutes) if task and task.minutes else "",
+                    id="minutes",
+                    compact=True,
+                    select_on_focus=False,
+                )
+                yield Label("title")
+                yield Input(
+                    task.title if task else "",
+                    id="title",
+                    compact=True,
+                    select_on_focus=False,
+                )
+            yield Static("", id="error", markup=False)
+            # the list is hidden behind the dialog, so confirm each added task
+            yield Static("", id="added", classes="muted", markup=False)
+            yield Static(hint, classes="muted", markup=False)
 
     def on_mount(self) -> None:
-        self.query_one("#title", Input).focus()
+        self.query_one("#available", Input).focus()
 
     @on(Input.Submitted)
     def action_save(self) -> None:
+        edited = self.edited_task
         try:
             available_text = self.query_one("#available", Input).value.strip()
             available = points(available_text) if available_text else None
-            task = Task(
-                title=self.query_one("#title", Input).value.strip(),
-                available=available,
-                earned=points(self.query_one("#earned", Input).value)
-                if available is not None
-                else Fraction(0),
-                minutes=parse_minutes(self.query_one("#minutes", Input).value),
-                checked=self.edited_task.complete
-                if self.edited_task and available is None
-                else False,
-                **({"id": self.edited_task.id} if self.edited_task else {}),
+            title = self.query_one("#title", Input).value
+            minutes = parse_minutes(self.query_one("#minutes", Input).value)
+            task = (
+                edited.edit(title, available, minutes)
+                if edited
+                else Task(title, available, minutes=minutes)
             )
-            day = self.app.day
-            section_id = self.query_one("#section", Select).value
-            new_title = self.query_one("#new-section", Input).value.strip()
-            if new_title:
-                section = Section(new_title)
-                day = replace(day, sections=day.sections + (section,))
-                section_id = section.id
-            day = day.put_task(task, section_id)
-            change = f"{'edited' if self.edited_task else 'added'} {task.title}"
-            self.app.save_change(day, change, task_id=task.id)
-        except (ValueError, sqlite3.Error, OSError) as error:
+            self.app.save_change(
+                self.app.day.put_task(task, self.section.id),
+                f"{'edited' if edited else 'added'} {task.title}",
+                task.id,
+            )
+        except RECOVERABLE as error:
             self.query_one("#error", Static).update(str(error))
             return
-        self.dismiss()
+        if edited:
+            self.dismiss()
+            return
+        for field in self.query(Input):
+            field.value = ""
+        self.query_one("#error", Static).update("")
+        self.query_one("#added", Static).update(f"added {task.title}")
+        self.query_one("#available", Input).focus()
 
 
 class SectionEditor(ModalScreen):
     BINDINGS = [("escape", "dismiss", "Cancel")]
 
-    def __init__(self, day: Day, section_id: str):
+    def __init__(self, section: Section):
         super().__init__()
-        self.edited_day = day
-        self.section_id = section_id
+        self.section = section
 
     def compose(self) -> ComposeResult:
-        section = next(s for s in self.edited_day.sections if s.id == self.section_id)
-        with VerticalScroll(classes="dialog", id="section-dialog"):
+        with Vertical(classes="dialog", id="section-dialog"):
             yield Label("Rename section", classes="dialog-title")
-            yield Label("Section (Space/Down to choose)", classes="field-label")
-            yield FormSelect(
-                [
-                    (Text(f"{index}. {s.title}"), s.id)
-                    for index, s in enumerate(self.edited_day.sections, 1)
-                ],
-                value=self.section_id,
-                allow_blank=False,
-                id="section",
+            yield Input(
+                self.section.title,
+                placeholder="untitled",
+                id="section-name",
+                compact=True,
             )
-            yield Label("Name", classes="field-label")
-            yield Input(section.title, id="section-name", select_on_focus=True)
             yield Static("", id="error", markup=False)
-            with DialogButtons():
-                yield Button("Cancel (Esc)", id="cancel", action="screen.dismiss")
-                yield Button(
-                    "Save (Enter)",
-                    id="save",
-                    variant="primary",
-                    action="screen.save",
-                )
+            yield Static(
+                "⏎ save · esc cancel · blank for untitled",
+                classes="muted",
+                markup=False,
+            )
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
 
-    @on(Select.Changed, "#section")
-    def section_changed(self, event: Select.Changed) -> None:
-        if event.value is Select.NULL:
-            return
-        section = next(s for s in self.edited_day.sections if s.id == event.value)
-        self.query_one(Input).value = section.title
-
     @on(Input.Submitted)
     def action_save(self) -> None:
         try:
-            section_id = self.query_one("#section", Select).value
             day = self.app.day.rename_section(
-                section_id, self.query_one("#section-name", Input).value
+                self.section.id, self.query_one(Input).value
             )
-            old, new = (
-                next(s.title for s in d.sections if s.id == section_id)
-                for d in (self.app.day, day)
+            renamed = next(s for s in day.sections if s.id == self.section.id)
+            self.app.save_change(
+                day,
+                f"renamed {section_label(self.section)} to {section_label(renamed)}",
+                self.section.id,
             )
-            self.app.save_change(day, f"renamed section {old} to {new}")
-        except (ValueError, sqlite3.Error, OSError) as error:
+        except RECOVERABLE as error:
             self.query_one("#error", Static).update(str(error))
             return
         self.dismiss()
@@ -483,17 +587,17 @@ class HelpScreen(ModalScreen):
     ]
 
     def compose(self) -> ComposeResult:
-        table = Table.grid(padding=(0, 2))
-        table.add_column(no_wrap=True)
-        table.add_column()
+        text = Text()
+        width = max(len(keys) for _, rows in HELP for keys, _ in rows) + 2
         for index, (group, rows) in enumerate(HELP):
             if index:
-                table.add_row()
-            table.add_row(Text(group, style="bold magenta"))
+                text.append("\n\n")
+            text.append(group, style="bold magenta")
             for keys, description in rows:
-                table.add_row(Text(keys, style="bold blue"), description)
+                text.append(f"\n{keys:<{width}}", style="bold blue")
+                text.append(description)
         with VimScroll(classes="dialog", id="help-dialog"):
-            yield Static(table)
+            yield Static(text)
 
     def on_mount(self) -> None:
         self.query_one(VimScroll).focus()
@@ -601,7 +705,7 @@ class ScheduleEditor(ModalScreen):
             )
             day = replace(self.app.day, intervals=intervals)
             self.app.save_change(day, "changed the schedule")
-        except (ValueError, sqlite3.Error, OSError) as error:
+        except RECOVERABLE as error:
             self.query_one("#error", Static).update(str(error))
             return
         self.dismiss()
@@ -658,7 +762,7 @@ class ReuseDay(ModalScreen):
                 source.copy_to(self.list_date),
                 f"replaced the list with {source.date.isoformat()}'s",
             )
-        except (ValueError, sqlite3.Error, OSError) as error:
+        except RECOVERABLE as error:
             self.query_one("#error", Static).update(str(error))
             return
         self.dismiss()
@@ -670,10 +774,8 @@ class TodoApp(App):
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
         Binding("a", "add", "Add"),
-        Binding("c", "reuse", "Reuse", show=False),
+        Binding("o", "new_section", "Section"),
         Binding("e", "edit", "Edit"),
-        Binding("r", "rename_section", "Rename section", show=False),
-        Binding("s", "schedule", "Schedule", show=False),
         Binding("space", "complete", "Done"),
         Binding("plus", "step(1)", "Points", key_display="+/-"),
         Binding("minus", "step(-1)", "Points down", show=False),
@@ -681,10 +783,11 @@ class TodoApp(App):
         Binding("delete", "delete", "Delete", key_display="dd"),
         Binding("u", "undo", "Undo"),
         Binding("question_mark", "help", "Keys"),
+        Binding("r", "rename_section", "Rename section", show=False),
+        Binding("c", "reuse", "Reuse", show=False),
+        Binding("s", "schedule", "Schedule", show=False),
         Binding("J", "move(1)", "Move down", show=False),
         Binding("K", "move(-1)", "Move up", show=False),
-        Binding("h,left", "tasks", "Tasks", show=False),
-        Binding("l,right", "details", "Details", show=False),
         Binding("ctrl+d", "choose_day", "Choose day", show=False),
         Binding("[", "shift_day(-1)", "Previous day", show=False),
         Binding("]", "shift_day(1)", "Next day", show=False),
@@ -696,8 +799,13 @@ class TodoApp(App):
     def __init__(self, store: Store, list_date: date):
         super().__init__(ansi_color=True)
         self.store = store
+        # undo history per date, kept while the app runs
+        self.histories: dict[date, list[Change]] = {}
         self._load_day(list_date)
-        self.history: list[Change] = []
+
+    @property
+    def history(self) -> tuple[Change, ...]:
+        return tuple(self.histories.get(self.day.date, ()))
 
     def on_notify(self) -> None:
         # textual has no public limit on toasts, and this handler runs before
@@ -712,95 +820,30 @@ class TodoApp(App):
         saved = self.store.load(list_date)
         self.day = saved if saved is not None else empty_day(list_date)
         self.persisted = saved is not None
+        history = self.histories.get(list_date)
+        # another session changed this day since the last change here, so
+        # undoing would overwrite their work; each entry depends on the next
+        if history and history[-1].after != self.day:
+            del self.histories[list_date]
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="day-bar"):
-            yield Button(
-                "",
-                id="choose-day",
-                compact=True,
-                tooltip="Choose day (Ctrl+D)",
-                action="app.choose_day",
-            )
-            yield Button(
-                Text("[ Prev"),
-                id="previous-day",
-                compact=True,
-                tooltip="Previous day ([)",
-                action="app.shift_day(-1)",
-            )
-            yield Button(
-                Text("] Next"),
-                id="next-day",
-                compact=True,
-                tooltip="Next day (])",
-                action="app.shift_day(1)",
-            )
-            yield Button(
-                "Today",
-                id="today",
-                compact=True,
-                tooltip="Today (t)",
-                action="app.today",
-            )
-            yield Button(
-                "Analytics →", id="toggle-view", compact=True, action="app.toggle_view"
-            )
+        yield Static("", id="date")
         with Horizontal(id="body"):
             with Vertical(id="task-pane"):
                 yield Static(
-                    task_row("", "Task", "Points", "Est.", "dim"),
+                    row(tuple(map(Text, ("", "done", "pts", "est", "t/pt"))), ""),
                     id="columns",
                 )
                 yield TaskList(id="tasks")
-                yield Static("a  Add a task\nc  Reuse a day's list", id="empty")
-            with AnalyticsPane(id="sidebar"):
-                yield Static("", id="score", markup=False)
-                yield Static("", id="time", markup=False)
-                yield Static("", id="difference", markup=False)
-                yield Static("", id="pace", markup=False)
-                yield Button(
-                    "Schedule",
-                    id="edit-schedule",
-                    compact=True,
-                    action="app.schedule",
-                    classes="pane-action",
-                )
-                yield Static("", id="schedule", markup=False)
-                yield Static("", id="estimates", markup=False)
-                yield Static("", id="details", markup=False)
+                yield Static("a  add tasks\nc  copy another day's list", id="empty")
+            yield Static("", id="stats")
         yield Footer(compact=True)
 
     def on_mount(self) -> None:
         self.theme = "ansi-dark"
         self.redraw()
-        self.set_interval(1, self.refresh_clock)
+        self.set_interval(1, self.refresh_stats)
         self.query_one("#tasks", TaskList).focus()
-
-    def on_resize(self, event: events.Resize) -> None:
-        self.default_screen.set_class(event.size.width < 72, "compact")
-        self.default_screen.set_class(event.size.width < 60, "narrow")
-
-    def on_descendant_focus(self) -> None:
-        focused = self.focused
-        ancestors = (focused, *focused.ancestors) if focused is not None else ()
-        pane = next(
-            (w for w in ancestors if isinstance(w, (TaskList, AnalyticsPane))), None
-        )
-        if pane is not None:
-            self.show_analytics(isinstance(pane, AnalyticsPane))
-
-    def show_analytics(self, show: bool) -> None:
-        self.default_screen.set_class(show, "analytics")
-        self.query_one("#toggle-view", Button).label = (
-            "← Tasks" if show else "Analytics →"
-        )
-
-    def action_toggle_view(self) -> None:
-        if self.default_screen.has_class("analytics"):
-            self.action_tasks()
-        else:
-            self.action_details()
 
     def action_choose_day(self) -> None:
         self.push_screen(DayPicker(self.day.date))
@@ -818,7 +861,7 @@ class TodoApp(App):
     def navigate_day(self, target: date) -> None:
         try:
             self.switch_day(target)
-        except (ValueError, sqlite3.Error, OSError) as error:
+        except RECOVERABLE as error:
             self.notify(
                 str(error), title="Could not open list", severity="error", timeout=8
             )
@@ -827,206 +870,133 @@ class TodoApp(App):
         if list_date == self.day.date:
             return
         self._load_day(list_date)
-        self.history.clear()
         self.query_one("#tasks", TaskList).highlighted = None
         self.redraw()
-        self.action_tasks()
 
-    def selected(self) -> tuple[Section, Task] | None:
+    def selected(self) -> tuple[Section, Task | None]:
+        """The highlighted row: a task with its section, or a section's rule.
+
+        A day always has a section and redraw always highlights a row, so a
+        missing row is a bug rather than a state to handle."""
         option = self.query_one("#tasks", TaskList).highlighted_option
-        if option is None:
-            return None
-        return next(((s, t) for s, t in self.day.tasks() if t.id == option.id), None)
+        if option is not None:
+            for section in self.day.sections:
+                if option.id == section.id:
+                    return section, None
+                for task in section.tasks:
+                    if task.id == option.id:
+                        return section, task
+        raise RuntimeError("the task list has no highlighted row")
 
-    def redraw(self, task_id: str | None = None) -> None:
+    def selected_task(self) -> tuple[Section, Task] | None:
+        section, task = self.selected()
+        return None if task is None else (section, task)
+
+    def redraw(self, selection: str | None = None) -> None:
         widget = self.query_one("#tasks", TaskList)
-        selected = self.selected()
-        task_id = task_id or (selected[1].id if selected else None)
-        old_index = widget.highlighted or 0
-        options = []
+        old = widget.highlighted_option
+        selection = selection or (old.id if old else None)
+        old_index = widget.highlighted
         _, total = score(task for _, task in self.day.tasks())
+        options = []
         for section in self.day.sections:
-            label = section_row(section, total)
-            options.append(Option(label, id=f"section-{section.id}", disabled=True))
-            for task in section.tasks:
-                if task.complete:
-                    state, color = "✓", "green"
-                elif task.earned:
-                    state, color = "~", "blue"
-                else:
-                    state, color = "", "default"
-                row = task_row(
-                    state,
-                    task.title,
-                    f"{number(task.earned)}/{number(task.available)}"
-                    if task.available is not None
-                    else "",
-                    f"{task.minutes}m" if task.minutes is not None else "",
-                    color,
-                )
-                options.append(Option(row, id=task.id))
+            # section and task ids are unique across both kinds (see Day)
+            options.append(Option(SectionRule(section, total), id=section.id))
+            options.extend(Option(task_row(task), id=task.id) for task in section.tasks)
         widget.clear_options().add_options(options)
-        enabled = [index for index, option in enumerate(options) if not option.disabled]
-        if enabled:
-            target = next(
-                (index for index in enabled if options[index].id == task_id), None
-            )
-            widget.highlighted = (
-                target
-                if target is not None
-                else min(enabled, key=lambda i: abs(i - old_index))
-            )
+        ids = [option.id for option in options]
+        if selection in ids:
+            target = ids.index(selection)
+        elif old_index is not None:
+            target = min(old_index, len(ids) - 1)
         else:
-            widget.highlighted = None
-        self.query_one("#empty", Static).display = not enabled
-        self.refresh_clock()
-        self.refresh_details()
+            # a freshly opened day starts on its first task
+            first = next((task.id for _, task in self.day.tasks()), ids[0])
+            target = ids.index(first)
+        widget.highlighted = target
+        self.query_one("#empty", Static).display = not any(self.day.tasks())
+        self.query_one("#date", Static).update(
+            Text(f"{self.day.date:%a} {self.day.date.isoformat()}", style="bold")
+        )
+        self.refresh_stats()
 
-    def refresh_clock(self) -> None:
+    def refresh_stats(self) -> None:
         if not self.is_running:
             return
-        now = datetime.now()
-        day = self.day
-        self.query_one(
-            "#choose-day", Button
-        ).label = f"{day.date:%a} {day.date.isoformat()} ▾"
-        self.query_one("#previous-day", Button).disabled = day.date == date.min
-        self.query_one("#next-day", Button).disabled = day.date == date.max
-        earned, available = score(t for _, t in day.tasks())
-        elapsed, total = time_progress(day.intervals, now)
-        progress = ratio(earned, available)
-        time_ratio = ratio(elapsed, total)
-        difference = (
-            progress - time_ratio
-            if progress is not None and time_ratio is not None
-            else None
+        full_title = None
+        if selected := self.selected_task():
+            tasks = self.query_one("#tasks", TaskList)
+            # option padding takes one column on each side
+            width = tasks.scrollable_content_region.width - 2 - FIXED_WIDTH
+            if Text(selected[1].title).cell_len > width:
+                full_title = selected[1].title
+        pane = self.query_one("#stats", Static)
+        pane.update(
+            stats(self.day, datetime.now(), pane.content_region.width, full_title)
         )
-        self.query_one("#score", Static).update(
-            progress_text(
-                "Points", f"{number(earned)} / {number(available)}", progress, "green"
-            )
-        )
-        text = progress_text(
-            "Time",
-            f"{duration(elapsed)} / {duration(total)}",
-            time_ratio,
-            "cyan",
-        )
-        text.append("\n" + schedule_status(day.intervals, now), style="default")
-        self.query_one("#time", Static).update(text)
-        text = Text("Score − time  ")
-        text.append(
-            percentage(difference, signed=True)
-            + (" pp" if difference is not None else ""),
-            style="bold magenta",
-        )
-        self.query_one("#difference", Static).update(text)
-        text = Text()
-        text.append(
-            f"Time / point      {per_point(total, available)}\n", style="default"
-        )
-        if not total:
-            remaining = "n/a"
-        elif elapsed == total:
-            remaining = "Ended"
-        else:
-            remaining = per_point(total - elapsed, available - earned)
-        text.append(f"Remaining / point {remaining}", style="default")
-        text.append("\nminutes:seconds", style="dim")
-        self.query_one("#pace", Static).update(text)
-        for selector in ("#time", "#difference", "#pace", "#schedule"):
-            self.query_one(selector).display = bool(day.intervals)
-        text = Text()
-        for interval in day.intervals:
-            start_offset = (interval.start.date() - day.date).days
-            end_offset = (interval.end.date() - day.date).days
-            start = f"{interval.start:%H:%M}" + (
-                f" (+{start_offset} day)" if start_offset else ""
-            )
-            end = f"{interval.end:%H:%M}" + (
-                f" (+{end_offset} day)" if end_offset else ""
-            )
-            text.append(
-                f"{start} to {end}\n",
-                style="default",
-            )
-        text.rstrip()
-        self.query_one("#schedule", Static).update(text)
-
-    def refresh_details(self) -> None:
-        selected = self.selected()
-        text = Text()
-        text.append("Task\n", style="bold magenta")
-        if selected:
-            section, task = selected
-            text.append(task.title, style="bold default")
-            if task.minutes is not None and task.available is not None:
-                text.append(
-                    f"\nTime / point      {per_point(task.minutes * 60, task.available)}",
-                    style="blue",
-                )
-                text.append(" mm:ss", style="dim")
-        self.query_one("#details", Static).update(text)
-        self.query_one("#details", Static).display = selected is not None
-        tasks = [task for _, task in self.day.tasks()]
-        estimates = [task.minutes for task in tasks if task.minutes is not None]
-        text = Text()
-        text.append("Estimates (h:mm)\n", style="bold magenta")
-        hours, minutes = divmod(sum(estimates), 60)
-        text.append(
-            f"{hours}:{minutes:02d} across {len(estimates)} tasks\n", style="default"
-        )
-        missing = len(tasks) - len(estimates)
-        if missing:
-            text.append(f"{missing} without an estimate", style="dim")
-        self.query_one("#estimates", Static).update(text)
-        self.query_one("#estimates", Static).display = bool(estimates)
 
     @on(OptionList.OptionHighlighted, "#tasks")
     def highlighted(self) -> None:
-        self.refresh_details()
+        self.refresh_stats()
 
     @on(OptionList.OptionSelected, "#tasks")
-    def edit_points(self) -> None:
-        selected = self.selected()
-        if selected:
-            section, task = selected
-            if task.available is None:
-                self.action_complete()
-            else:
-                self.push_screen(PointsEditor(task, section.id))
+    def activate(self) -> None:
+        section, task = self.selected()
+        if task is None:
+            self.push_screen(SectionEditor(section))
+        elif task.available is None:
+            self.action_complete()
+        else:
+            self.push_screen(PointsEditor(task, section.id))
 
     def save_change(
-        self, day: Day, description: str, task_id: str | None = None
+        self,
+        day: Day,
+        description: str,
+        subject: str | None = None,
+        *,
+        select: str | None = None,
     ) -> None:
+        """Save a change about the subject row, which is selected after the
+        change unless select names another row, and again after undoing."""
         if day == self.day:
             return
         self.store.save(day, expected=self.day if self.persisted else None)
-        self.history.append(Change(self.day, self.persisted, description, task_id))
+        self.histories.setdefault(day.date, []).append(
+            Change(self.day, self.persisted, day, description, subject)
+        )
         self.day = day
         self.persisted = True
-        self.redraw(task_id)
+        self.redraw(select or subject)
 
     def save_or_notify(
-        self, day: Day, description: str, task_id: str | None = None
+        self,
+        day: Day,
+        description: str,
+        subject: str | None = None,
+        *,
+        select: str | None = None,
     ) -> None:
         try:
-            self.save_change(day, description, task_id)
-        except (ValueError, sqlite3.Error, OSError) as error:
+            self.save_change(day, description, subject, select=select)
+        except RECOVERABLE as error:
             self.notify(str(error), title="Could not save", severity="error", timeout=8)
 
     def action_add(self) -> None:
-        selected = self.selected()
-        self.push_screen(
-            TaskEditor(
-                self.day, None, selected[0].id if selected else self.day.sections[0].id
-            )
+        self.push_screen(TaskEditor(None, self.selected()[0]))
+
+    def action_new_section(self) -> None:
+        section = Section("")
+        self.save_or_notify(
+            self.day.insert_section(section, after=self.selected()[0].id),
+            f"added {section_label(section)}",
+            section.id,
         )
 
     def action_reuse(self) -> None:
         try:
             sources = tuple(d for d in self.store.list_dates() if d != self.day.date)
-        except (ValueError, sqlite3.Error, OSError) as error:
+        except RECOVERABLE as error:
             self.notify(str(error), title="Could not open lists", severity="error")
             return
         if not sources:
@@ -1035,77 +1005,101 @@ class TodoApp(App):
         self.push_screen(ReuseDay(self.day.date, sources))
 
     def action_edit(self) -> None:
-        if selected := self.selected():
-            self.push_screen(TaskEditor(self.day, selected[1], selected[0].id))
+        section, task = self.selected()
+        if task is None:
+            self.push_screen(SectionEditor(section))
+        else:
+            self.push_screen(TaskEditor(task, section))
 
     def action_rename_section(self) -> None:
-        selected = self.selected()
-        section = selected[0] if selected else self.day.sections[0]
-        self.push_screen(SectionEditor(self.day, section.id))
+        self.push_screen(SectionEditor(self.selected()[0]))
 
     def action_schedule(self) -> None:
         self.push_screen(ScheduleEditor(self.day))
 
     def action_complete(self) -> None:
-        if selected := self.selected():
+        if selected := self.selected_task():
             self.save_progress(*selected, selected[1].toggle())
 
     def action_step(self, delta: int) -> None:
-        if selected := self.selected():
+        if selected := self.selected_task():
             self.save_progress(*selected, selected[1].step(delta))
 
     def save_progress(self, section: Section, before: Task, after: Task) -> None:
         self.save_or_notify(
             self.day.put_task(after, section.id),
             progress_change(before, after),
-            task_id=after.id,
+            after.id,
         )
 
     def action_delete(self) -> None:
-        if selected := self.selected():
-            task = selected[1]
+        section, task = self.selected()
+        if task is not None:
+            # stay inside the section: landing on the next section's rule would
+            # make a repeated dd delete that whole section
+            tasks = section.tasks
+            index = tasks.index(task)
+            neighbours = tasks[index + 1 : index + 2] or tasks[index - 1 : index]
             self.save_or_notify(
-                self.day.remove_task(task.id), f"deleted {task.title}", task_id=task.id
+                self.day.remove_task(task.id),
+                f"deleted {task.title}",
+                task.id,
+                select=neighbours[0].id if neighbours else section.id,
             )
+            return
+        count = len(section.tasks)
+        tasks = f" and its {count} task{'s' if count != 1 else ''}" if count else ""
+        removed = self.day.remove_section(section.id)
+        verb = (
+            "cleared" if len(removed.sections) == len(self.day.sections) else "deleted"
+        )
+        self.save_or_notify(
+            removed, f"{verb} {section_label(section)}{tasks}", section.id
+        )
 
-    def action_move(self, offset: int) -> None:
-        if selected := self.selected():
-            task = selected[1]
+    def action_move(self, offset: Literal[-1, 1]) -> None:
+        section, task = self.selected()
+        direction = "down" if offset > 0 else "up"
+        if task is not None:
             self.save_or_notify(
                 self.day.move_task(task.id, offset),
-                f"moved {task.title} {'down' if offset > 0 else 'up'}",
-                task_id=task.id,
+                f"moved {task.title} {direction}",
+                task.id,
+            )
+        else:
+            self.save_or_notify(
+                self.day.move_section(section.id, offset),
+                f"moved {section_label(section)} {direction}",
+                section.id,
             )
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
 
     def action_undo(self) -> None:
-        if not self.history:
+        history = self.histories.get(self.day.date)
+        if not history:
             self.notify("Nothing to undo.", timeout=2)
             return
-        change = self.history[-1]
+        change = history[-1]
         try:
             if change.previous_persisted:
-                self.store.save(change.previous, expected=self.day)
+                self.store.save(change.previous, expected=change.after)
             else:
-                self.store.delete(self.day)
-        except (ValueError, sqlite3.Error, OSError) as error:
+                self.store.delete(change.after)
+        except ValueError as error:
+            # the stored day no longer matches this history, so none of it applies
+            del self.histories[self.day.date]
             self.notify(str(error), title="Could not undo", severity="error", timeout=8)
             return
-        self.history.pop()
+        except RECOVERABLE as error:
+            self.notify(str(error), title="Could not undo", severity="error", timeout=8)
+            return
+        history.pop()
         self.day = change.previous
         self.persisted = change.previous_persisted
-        self.redraw(change.task_id)
+        self.redraw(change.subject)
         self.notify(f"Undid: {change.description}", timeout=4, markup=False)
-
-    def action_tasks(self) -> None:
-        self.show_analytics(False)
-        self.query_one("#tasks", TaskList).focus()
-
-    def action_details(self) -> None:
-        self.show_analytics(True)
-        self.query_one("#sidebar", VerticalScroll).focus()
 
 
 def main() -> None:
@@ -1128,6 +1122,6 @@ def main() -> None:
     try:
         store = Store(args.database.expanduser())
         app = TodoApp(store, args.date)
-    except (ValueError, sqlite3.Error, OSError) as error:
+    except RECOVERABLE as error:
         parser.exit(2, f"todo: {error}\n")
     app.run()

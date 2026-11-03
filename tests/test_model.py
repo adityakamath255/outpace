@@ -118,10 +118,11 @@ def test_rename_section_preserves_other_day_data_and_allows_duplicate_titles():
     assert day.sections == (first, second)
 
 
-def test_rename_section_rejects_blank_titles_and_unknown_ids():
+def test_blank_section_titles_mean_untitled_and_unknown_ids_are_rejected():
     day = empty_day(DAY)
-    with pytest.raises(ValueError, match="title"):
-        day.rename_section(day.sections[0].id, " \t ")
+    assert day.sections[0].title == ""
+    named = day.rename_section(day.sections[0].id, "Work")
+    assert named.rename_section(day.sections[0].id, " \t ").sections[0].title == ""
     with pytest.raises(ValueError, match="section"):
         day.rename_section("missing", "Work")
 
@@ -131,7 +132,7 @@ def test_points_and_estimates_are_independent():
     edited = replace(task, minutes=10)
     assert edited.earned == task.earned
     assert score((edited, Task("Note", None, checked=True))) == (Fraction(3, 4), 4)
-    assert per_point(task.minutes * 60, task.available) == "10:00"
+    assert per_point(task.minutes * 60, task.available) == "10m"
 
 
 def test_decimal_points_round_trip_without_display_loss():
@@ -251,9 +252,9 @@ def test_report_matches_the_original_calculations():
         percentage(ratio(earned, available) - ratio(elapsed, total), signed=True)
         == "+9.52"
     )
-    assert duration(total) == "10:30:00"
-    assert per_point(total, available) == "15:00"
-    assert per_point(total - elapsed, available - earned) == "17:30"
+    assert duration(total) == "10h30m"
+    assert per_point(total, available) == "15m"
+    assert per_point(total - elapsed, available - earned) == "17m30s"
     assert percentage(ratio(0, 0)) == "n/a"
     assert per_point(0, Fraction(0)) == "n/a"
 
@@ -289,3 +290,61 @@ def test_step_changes_earned_points_by_one_within_bounds():
     assert Task("Read", points("3")).step(-1).earned == 0
     assert Task("Remember", None).step(1).checked
     assert not Task("Remember", None, checked=True).step(-1).checked
+
+
+def test_durations_drop_zero_parts():
+    assert [duration(s) for s in (0, 59, 2400, 10800, 13200, 10799, 400)] == [
+        "0s",
+        "59s",
+        "40m",
+        "3h",
+        "3h40m",
+        "2h59m59s",
+        "6m40s",
+    ]
+
+
+def test_tasks_move_across_section_boundaries():
+    a, b, c = (Task(name, None) for name in "abc")
+    first, second = Section("", (a, b)), Section("", (c,))
+    day = Day(DAY, (), (first, second))
+
+    def titles(day):
+        return [[task.title for task in section.tasks] for section in day.sections]
+
+    assert titles(day.move_task(b.id, 1)) == [["a"], ["b", "c"]]
+    assert titles(day.move_task(c.id, -1)) == [["a", "b", "c"], []]
+    assert day.move_task(a.id, -1) == day
+    assert day.move_task(c.id, 1) == day
+
+
+def test_sections_insert_move_and_remove():
+    task = Task("Practice", points("2"))
+    first, second = Section("One", (task,)), Section("Two")
+    day = Day(DAY, (), (first, second))
+    new = Section("")
+    assert day.insert_section(new, after=first.id).sections == (first, new, second)
+    assert day.move_section(first.id, 1).sections == (second, first)
+    assert day.move_section(first.id, -1) == day
+    assert day.remove_section(first.id).sections == (second,)
+    only = Day(DAY, (), (first,))
+    assert only.remove_section(first.id).sections == (replace(first, tasks=()),)
+
+
+def test_editing_a_task_keeps_completion_and_caps_partial_progress():
+    partial = Task("Read", points("4"), points("3"))
+    assert partial.edit("Read", points("2"), None).earned == 2
+    assert partial.edit("Read", points("5"), None).earned == 3
+    done = Task("Read", points("2"), points("2"))
+    assert done.edit("Read", points("5"), 30).complete
+    checked = Task("Remember", None, checked=True)
+    assert checked.edit("Remember", points("3"), None).earned == 3
+    assert partial.edit("Read", None, None) == replace(
+        partial, available=None, earned=Fraction(0)
+    )
+    assert done.edit("Read", None, None).checked
+
+
+def test_titles_are_trimmed_by_the_model():
+    assert Task("  Read ", None).title == "Read"
+    assert Section(" Work ").title == "Work"
