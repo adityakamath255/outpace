@@ -51,9 +51,6 @@ from .model import (
 # failures shown to the user while the draft or the list stays as it was
 RECOVERABLE = (ValueError, sqlite3.Error, OSError)
 
-# marker, earned, available, duration, time per point; the title takes the rest
-CELL_WIDTHS = (1, 5, 4, 6, 8)
-FIXED_WIDTH = sum(CELL_WIDTHS) + len(CELL_WIDTHS)
 BAR_WIDTH = 32
 MAX_MESSAGES = 5
 
@@ -74,9 +71,67 @@ def pace(seconds: int, available: Fraction) -> Text:
     return Text("-") if value is None else duration(value)
 
 
+def completion(task: Task) -> Fraction | None:
+    if task.available is None:
+        return None
+    return task.earned / task.available
+
+
+def time_per_point(task: Task) -> Fraction | None:
+    if task.minutes is None or task.available is None:
+        return None
+    return task.minutes / task.available
+
+
+class Column(NamedTuple):
+    """A sortable column of the task list."""
+
+    header: str
+    # cells, wide enough for the longest value it shows
+    width: int
+    # None marks a task without the value; such tasks sort last
+    value: Callable[[Task], Fraction | int | None]
+    # the direction a first click gives and the menu lists first
+    descending: bool
+    # how the menu names each direction: ascending, then descending
+    words: tuple[str, str]
+
+
+COLUMNS = (
+    Column("done", 5, completion, False, ("least done first", "most done first")),
+    Column(
+        "pts",
+        4,
+        lambda task: task.available,
+        True,
+        ("fewest points first", "most points first"),
+    ),
+    Column(
+        "dur",
+        6,
+        lambda task: task.minutes,
+        False,
+        ("shortest duration first", "longest duration first"),
+    ),
+    Column(
+        "t/pt",
+        8,
+        time_per_point,
+        False,
+        ("least time per point first", "most time per point first"),
+    ),
+)
+
+
+# the cells before the title: a done or partial marker, then the columns
+WIDTHS = (1, *(column.width for column in COLUMNS))
+FIXED_WIDTH = sum(WIDTHS) + len(WIDTHS)
+
+
 def row(cells: tuple[Text | str, ...], title: Text | str) -> Table:
+    """Cells in WIDTHS order, then the title in the rest of the line."""
     table = Table.grid(padding=(0, 1), expand=True)
-    for width in CELL_WIDTHS:
+    for width, _ in zip(WIDTHS, cells, strict=True):
         table.add_column(width=width, justify="right", no_wrap=True)
     table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
     table.add_row(*cells, title)
@@ -101,53 +156,6 @@ def task_row(task: Task) -> Table:
         else "",
     )
     return row(cells, Text(task.title))
-
-
-def completion(task: Task) -> Fraction | None:
-    if task.available is None:
-        return None
-    return task.earned / task.available
-
-
-def time_per_point(task: Task) -> Fraction | None:
-    if task.minutes is None or task.available is None:
-        return None
-    return task.minutes / task.available
-
-
-class Column(NamedTuple):
-    """A sortable column of the task list."""
-
-    header: str
-    # None marks a task without the value; such tasks sort last
-    value: Callable[[Task], Fraction | int | None]
-    # the direction a first click gives and the menu lists first
-    descending: bool
-    # how the menu names each direction: ascending, then descending
-    words: tuple[str, str]
-
-
-COLUMNS = (
-    Column("done", completion, False, ("least done first", "most done first")),
-    Column(
-        "pts",
-        lambda task: task.available,
-        True,
-        ("fewest points first", "most points first"),
-    ),
-    Column(
-        "dur",
-        lambda task: task.minutes,
-        False,
-        ("shortest duration first", "longest duration first"),
-    ),
-    Column(
-        "t/pt",
-        time_per_point,
-        False,
-        ("least time per point first", "most time per point first"),
-    ),
-)
 
 
 class Sort(NamedTuple):
@@ -228,7 +236,7 @@ def next_sort(current: Sort | None, column: Column) -> Sort | None:
 def column_at(x: int) -> Column | None:
     """The sortable column at x cells into a row, matching row's grid."""
     start = 0
-    for width, column in zip(CELL_WIDTHS, (None, *COLUMNS), strict=True):
+    for width, column in zip(WIDTHS, (None, *COLUMNS), strict=True):
         if start <= x < start + width:
             return column
         start += width + 1
