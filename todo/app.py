@@ -1,6 +1,6 @@
 import argparse
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime, timedelta
@@ -159,10 +159,8 @@ class Sort(NamedTuple):
         return self.column.words[self.descending]
 
 
-def arrange(tasks: tuple[Task, ...], sort: Sort | None) -> tuple[Task, ...]:
-    """Tasks in display order; a sort is stable, so ties keep stored order."""
-    if sort is None:
-        return tasks
+def arrange(tasks: tuple[Task, ...], sort: Sort) -> tuple[Task, ...]:
+    """Tasks in sorted order; a sort is stable, so ties keep stored order."""
     keyed: list[tuple[Fraction | int, Task]] = []
     missing: list[Task] = []
     for task in tasks:
@@ -173,6 +171,49 @@ def arrange(tasks: tuple[Task, ...], sort: Sort | None) -> tuple[Task, ...]:
             keyed.append((value, task))
     keyed.sort(key=lambda pair: pair[0], reverse=sort.descending)
     return tuple(task for _, task in keyed) + tuple(missing)
+
+
+class View(NamedTuple):
+    """What the task pane shows of a day under a sort and the done filter."""
+
+    day: Day
+    # as chosen, for the column names, even while sections are shown
+    sort: Sort | None
+    # each section with its tasks that the filter leaves, in stored order
+    groups: tuple[tuple[Section, tuple[Task, ...]], ...]
+    # the shown tasks in sorted order, or None while sections are shown:
+    # unsorted, or sorted with no task shown, which would leave no row
+    flat: tuple[Task, ...] | None
+    # how many done tasks the filter hides
+    hidden: int
+
+    def shown_in(self, section: Section) -> tuple[Task, ...]:
+        return next(tasks for s, tasks in self.groups if s.id == section.id)
+
+    def shown(self) -> tuple[Task, ...]:
+        return tuple(task for _, tasks in self.groups for task in tasks)
+
+    def first_row(self) -> str:
+        """Where a freshly opened day starts: its first task, else its first rule."""
+        tasks = self.flat or self.shown()
+        return tasks[0].id if tasks else self.day.sections[0].id
+
+    def neighbours(self, section: Section) -> tuple[Task, ...]:
+        """The tasks a deleted task's selection may pass to: any while sorted;
+        otherwise its section's, since landing on the next section's rule
+        would make a repeated x delete that whole section."""
+        return self.flat or self.shown_in(section)
+
+
+def view(day: Day, sort: Sort | None, hide_done: bool) -> View:
+    groups = tuple(
+        (s, tuple(t for t in s.tasks if not (hide_done and t.complete)))
+        for s in day.sections
+    )
+    shown = tuple(task for _, tasks in groups for task in tasks)
+    flat = arrange(shown, sort) if sort is not None and shown else None
+    hidden = sum(task.complete for task in day.tasks()) if hide_done else 0
+    return View(day, sort, groups, flat, hidden)
 
 
 def next_sort(current: Sort | None, column: Column) -> Sort | None:
@@ -484,6 +525,61 @@ class VimList(OptionList):
         raise RuntimeError("the task list has no selectable row")
 
 
+class TaskPane(Vertical):
+    """The column names, the task list and its hint, all drawn from one
+    View. The cursor stays on a row the view shows and may select."""
+
+    def compose(self) -> ComposeResult:
+        yield Static(header_row(None), id="columns")
+        with Vertical(id="list-area"):
+            yield VimList(id="tasks")
+            yield Static("", id="empty")
+
+    @property
+    def selected_id(self) -> str | None:
+        option = self.query_one(VimList).highlighted_option
+        return option.id if option else None
+
+    def select(self, row_id: str) -> None:
+        widget = self.query_one(VimList)
+        widget.highlighted = widget.get_option_index(row_id)
+
+    def show(self, view: View, selection: str | None = None) -> None:
+        """Draws view, selecting the row selection names if shown, else the
+        row that was selected, else the nearest row where the cursor was."""
+        widget = self.query_one(VimList)
+        selection = selection or self.selected_id
+        old_index = widget.highlighted
+        options: list[Option] = []
+        if view.flat is not None:
+            options = [Option(task_row(task), id=task.id) for task in view.flat]
+        else:
+            _, total = score(view.day.tasks())
+            for section, tasks in view.groups:
+                # section and task ids are unique across both kinds (see Day)
+                options.append(Option(SectionRule(section, total), id=section.id))
+                options.extend(Option(task_row(t), id=t.id) for t in tasks)
+                subtotal = subtotal_row(section)
+                if subtotal is not None:
+                    # disabled, so the cursor passes over it
+                    options.append(Option(subtotal, disabled=True))
+        widget.set_options(options)
+        ids = [option.id for option in options]
+        if selection is not None and selection in ids:
+            widget.highlighted = ids.index(selection)
+        else:
+            # the selected row is gone, so keep the cursor where it was, or
+            # move up within its section rather than onto the next one
+            widget.highlighted = widget.selectable_near(old_index or 0, -1)
+        empty = self.query_one("#empty", Static)
+        if any(view.day.tasks()):
+            empty.update("all done · f shows them")
+        else:
+            empty.update("o  add tasks\nc  copy another day's list")
+        empty.display = not view.shown()
+        self.query_one("#columns", Static).update(header_row(view.sort))
+
+
 class VimScroll(VerticalScroll):
     BINDINGS = [
         Binding("j", "scroll_down", "Scroll down", show=False),
@@ -733,17 +829,13 @@ class TodoApp(App):
     def compose(self) -> ComposeResult:
         yield Static("", id="date")
         with Horizontal(id="body"):
-            with Vertical(id="task-pane"):
-                yield Static(header_row(None), id="columns")
-                with Vertical(id="list-area"):
-                    yield VimList(id="tasks")
-                    yield Static("", id="empty")
+            yield TaskPane(id="task-pane")
             yield Static("", id="stats")
         yield Footer(compact=True)
 
     def on_mount(self) -> None:
         self.theme = "ansi-dark"
-        self.redraw(self.first_row())
+        self.redraw(self.current_view().first_row())
         self.set_interval(1, self.refresh_stats)
         self.query_one("#tasks", VimList).focus()
 
@@ -779,56 +871,29 @@ class TodoApp(App):
         if list_date == self.day.date:
             return
         self.day = self.store.load(list_date)
-        self.redraw(self.first_row())
+        self.redraw(self.current_view().first_row())
 
     def selected(self) -> tuple[Section, Task | None]:
         """The highlighted row: a task with its section, or a section's rule.
 
         A day always has a section and redraw always highlights a row, so a
         missing row is a bug rather than a state to handle."""
-        option = self.query_one("#tasks", VimList).highlighted_option
-        if option is not None:
-            for section in self.day.sections:
-                if option.id == section.id:
-                    return section, None
-                for task in section.tasks:
-                    if task.id == option.id:
-                        return section, task
+        row_id = self.query_one(TaskPane).selected_id
+        for section in self.day.sections:
+            if row_id == section.id:
+                return section, None
+            for task in section.tasks:
+                if task.id == row_id:
+                    return section, task
         raise RuntimeError("the task list has no highlighted row")
 
-    def first_row(self) -> str:
-        """Where a freshly opened day starts: its first task, else its first rule."""
-        ordered = self.sorted_tasks()
-        if ordered:
-            return ordered[0].id
-        tasks = self.all_shown()
-        return tasks[0].id if tasks else self.day.sections[0].id
-
-    def shown(self, tasks: Iterable[Task]) -> tuple[Task, ...]:
-        if not self.hide_done:
-            return tuple(tasks)
-        return tuple(task for task in tasks if not task.complete)
-
-    def all_shown(self) -> tuple[Task, ...]:
-        return self.shown(self.day.tasks())
-
-    def hidden_count(self) -> int:
-        """How many done tasks the filter hides."""
-        return sum(t.complete for t in self.day.tasks()) if self.hide_done else 0
-
-    def sorted_tasks(self) -> tuple[Task, ...] | None:
-        """Every shown task in sorted order, or None while the list shows
-        sections: unsorted, or sorted with nothing shown, which would leave no
-        row."""
-        tasks = self.all_shown()
-        if self.sort is None or not tasks:
-            return None
-        return arrange(tasks, self.sort)
+    def current_view(self) -> View:
+        return view(self.day, self.sort, self.hide_done)
 
     def refuse_while_sorted(self, action: str) -> bool:
         """Says so when the sorted list hides the order or sections an action
         works on."""
-        if self.sort is None or self.sorted_tasks() is None:
+        if self.sort is None or self.current_view().flat is None:
             return False
         self.notify(
             f"Sorted by {self.sort.words}; choose stored order with s to {action}.",
@@ -837,44 +902,11 @@ class TodoApp(App):
         return True
 
     def redraw(self, selection: str | None = None) -> None:
-        widget = self.query_one("#tasks", VimList)
-        old = widget.highlighted_option
-        selection = selection or (old.id if old else None)
-        old_index = widget.highlighted
-        _, total = score(self.day.tasks())
-        ordered = self.sorted_tasks()
-        if ordered is not None:
-            options = [Option(task_row(task), id=task.id) for task in ordered]
-        else:
-            options = []
-            for section in self.day.sections:
-                # section and task ids are unique across both kinds (see Day)
-                options.append(Option(SectionRule(section, total), id=section.id))
-                options.extend(
-                    Option(task_row(t), id=t.id) for t in self.shown(section.tasks)
-                )
-                subtotal = subtotal_row(section)
-                if subtotal is not None:
-                    # disabled, so the cursor passes over it
-                    options.append(Option(subtotal, disabled=True))
-        widget.set_options(options)
-        ids = [option.id for option in options]
-        if selection is not None and selection in ids:
-            widget.highlighted = ids.index(selection)
-        else:
-            # the selected row is gone, so keep the cursor where it was, or
-            # move up within its section rather than onto the next one
-            widget.highlighted = widget.selectable_near(old_index or 0, -1)
-        empty = self.query_one("#empty", Static)
-        if any(self.day.tasks()):
-            empty.update("all done · f shows them")
-        else:
-            empty.update("o  add tasks\nc  copy another day's list")
-        empty.display = not self.all_shown()
-        self.query_one("#columns", Static).update(header_row(self.sort))
+        current = self.current_view()
+        self.query_one(TaskPane).show(current, selection)
         line = Text(f"{self.day.date:%a} {self.day.date.isoformat()}", style="bold")
         if self.hide_done:
-            line.append(f"   {self.hidden_count()} done hidden · ", style="dim")
+            line.append(f"   {current.hidden} done hidden · ", style="dim")
             line.append("f", style="bold blue")
             line.append(" shows them", style="dim")
         self.query_one("#date", Static).update(line)
@@ -1111,10 +1143,7 @@ class TodoApp(App):
     def action_delete(self) -> None:
         section, task = self.selected()
         if task is not None:
-            # sorted, any neighbour will do; otherwise stay inside the section,
-            # since landing on the next section's rule would make a repeated x
-            # delete that whole section
-            tasks = self.sorted_tasks() or self.shown(section.tasks)
+            tasks = self.current_view().neighbours(section)
             index = tasks.index(task)
             neighbours = tasks[index + 1 : index + 2] or tasks[index - 1 : index]
             if self.save_or_notify(
@@ -1160,7 +1189,7 @@ class TodoApp(App):
             return
         section, task = self.selected()
         direction = "down" if offset > 0 else "up"
-        if task is not None and self.hidden_count():
+        if task is not None and self.current_view().hidden:
             # a move could swap with a hidden neighbour and show no change
             self.notify(
                 "Done tasks are hidden; show them with f to move tasks.", timeout=4
@@ -1192,10 +1221,9 @@ class TodoApp(App):
         elif index + 1 < len(sections):
             target = sections[index + 1].id
         else:
-            tasks = self.shown(section.tasks)
+            tasks = self.current_view().shown_in(section)
             target = tasks[-1].id if tasks else section.id
-        widget = self.query_one("#tasks", VimList)
-        widget.highlighted = widget.get_option_index(target)
+        self.query_one(TaskPane).select(target)
 
     def action_sort(self) -> None:
         self.push_screen(SortMenu(self.sort, self.set_sort))

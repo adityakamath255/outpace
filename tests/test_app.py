@@ -755,7 +755,6 @@ def test_sorting_puts_missing_values_last_and_keeps_ties_in_stored_order():
     a, b = Task("a", points("2"), minutes=30), Task("b", points("2"), minutes=10)
     c, d = Task("c", None, minutes=10), Task("d", None)
     tasks = (a, b, c, d)
-    assert arrange(tasks, None) == tasks
     assert arrange(tasks, Sort(est, False)) == (b, c, a, d)
     assert arrange(tasks, Sort(est, True)) == (a, b, c, d)
     assert arrange(tasks, Sort(pts, True)) == (a, b, c, d)
