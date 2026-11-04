@@ -1,6 +1,7 @@
 import argparse
 import sqlite3
 from collections.abc import Callable, Iterable
+from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime, timedelta
 from fractions import Fraction
@@ -215,10 +216,9 @@ def section_share(section: Section, total: Fraction) -> str:
     """The section's part of the day's points, or nothing when that says
     nothing: no points, or all of them."""
     _, available = score(section.tasks)
-    share = ratio(available, total)
-    if not available or share == 1:
+    if not available or available == total:
         return ""
-    return f"{percentage(share)}% of total"
+    return f"{percentage(available / total)}% of total"
 
 
 class SectionRule:
@@ -522,7 +522,7 @@ class Prompt(Form):
     keep the prompt open with the reason shown."""
 
     def __init__(
-        self, title: str, value: str, hint: str, on_submit: Callable[[str], None]
+        self, title: str, value: str, hint: str, on_submit: Callable[[str], object]
     ):
         super().__init__()
         self.title_text = title
@@ -553,7 +553,7 @@ class TaskEditor(Form):
     }
 
     def __init__(
-        self, task: Task | None, heading: str, on_submit: Callable[[Task], None]
+        self, task: Task | None, heading: str, on_submit: Callable[[Task], object]
     ):
         super().__init__()
         self.edited_task = task
@@ -856,7 +856,7 @@ class TodoApp(App):
                 if subtotal is not None:
                     # disabled, so the cursor passes over it
                     options.append(Option(subtotal, disabled=True))
-        widget.clear_options().add_options(options)
+        widget.set_options(options)
         ids = [option.id for option in options]
         if selection is not None and selection in ids:
             widget.highlighted = ids.index(selection)
@@ -907,7 +907,7 @@ class TodoApp(App):
         if task.available is None:
             self.action_complete()
         else:
-            self.edit_points(task, task.available)
+            self.edit_points(task)
 
     def save_change(
         self,
@@ -916,11 +916,12 @@ class TodoApp(App):
         subject: str | None = None,
         *,
         select: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Save a change about the subject row, which is selected after the
-        change unless select names another row, and again after undoing."""
+        change unless select names another row, and again after undoing.
+        Returns whether anything changed."""
         if day == self.day:
-            return
+            return False
         self.store.save(day)
         self.histories.setdefault(day.date, []).append(
             Change(self.day, description, subject)
@@ -928,6 +929,7 @@ class TodoApp(App):
         self.redos.pop(day.date, None)
         self.day = day
         self.redraw(select or subject)
+        return True
 
     def save_or_notify(
         self,
@@ -937,13 +939,12 @@ class TodoApp(App):
         *,
         select: str | None = None,
     ) -> bool:
-        """Whether the day is saved, unchanged counting as saved."""
+        """Whether the day changed: an unchanged day saves nothing."""
         try:
-            self.save_change(day, description, subject, select=select)
+            return self.save_change(day, description, subject, select=select)
         except RECOVERABLE as error:
             self.notify(str(error), title="Could not save", severity="error", timeout=8)
             return False
-        return True
 
     def insertion_point(self, below: bool) -> tuple[Section, int]:
         """Where a task goes relative to the selected row; a rule's section
@@ -1052,7 +1053,11 @@ class TodoApp(App):
             )
         )
 
-    def edit_points(self, task: Task, available: Fraction) -> None:
+    def edit_points(self, task: Task) -> None:
+        if task.available is None:
+            raise RuntimeError("unscored tasks have no points to set")
+        available = task.available
+
         def save(value: str) -> None:
             after = replace(task, earned=points(value))
             self.save_change(
@@ -1265,10 +1270,12 @@ def main() -> None:
     args = parser.parse_args()
     try:
         store = Store(args.database.expanduser())
-        app = TodoApp(store, args.date)
     except RECOVERABLE as error:
         parser.exit(2, f"todo: {error}\n")
-    try:
+    # the store holds an exclusive lock, so release it however the app ends
+    with closing(store):
+        try:
+            app = TodoApp(store, args.date)
+        except RECOVERABLE as error:
+            parser.exit(2, f"todo: {error}\n")
         app.run()
-    finally:
-        store.close()

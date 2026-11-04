@@ -92,9 +92,8 @@ class Task:
 
     def duplicate(self, *, keep_progress: bool) -> Task:
         """The same plan under a new identity, with or without its progress."""
-        if keep_progress:
-            return replace(self, id=identifier())
-        return replace(self, id=identifier(), earned=Fraction(0))
+        earned = self.earned if keep_progress else Fraction(0)
+        return replace(self, id=identifier(), earned=earned)
 
     def step(self, delta: int) -> Task:
         if self.available is None:
@@ -377,9 +376,7 @@ def number(value: Fraction) -> str:
         )
 
 
-def percentage(value: Fraction | None) -> str:
-    if value is None:
-        return "n/a"
+def percentage(value: Fraction) -> str:
     hundredths = int(value * 10_000)
     sign = "-" if hundredths < 0 else ""
     whole, decimal = divmod(abs(hundredths), 100)

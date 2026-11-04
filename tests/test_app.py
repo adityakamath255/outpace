@@ -1,6 +1,7 @@
 import asyncio
 import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime
 from io import StringIO
@@ -22,7 +23,6 @@ from todo.app import (
 from todo.db import Store
 from todo.model import Interval, Section, Task, empty_day, parse_schedule, points
 
-HOUR = 3600
 SCHEDULE = parse_schedule("07:30-11:00, 16:00-23:00")
 
 
@@ -75,9 +75,9 @@ def app(tmp_path):
         intervals=SCHEDULE,
         sections=(Section("Tasks", (Task("Practice", points("5"), points("2"), 30),)),),
     )
-    store = Store(tmp_path / "todo.sqlite3")
-    store.save(day)
-    return TodoApp(store, day.date)
+    with closing(Store(tmp_path / "todo.sqlite3")) as store:
+        store.save(day)
+        yield TodoApp(store, day.date)
 
 
 def test_browsing_days_does_not_show_notifications(app, monkeypatch):
@@ -622,6 +622,16 @@ def test_put_copies_the_last_deleted_row_and_resets_progress_on_other_days(app):
             assert app.store.load(app.day.date) == app.day
 
     asyncio.run(put())
+
+
+def test_a_delete_that_changes_nothing_keeps_the_row_to_put(app):
+    async def delete_twice():
+        async with app.run_test() as pilot:
+            # the second x clears a section that is already empty
+            await pilot.press("x", "x", "p")
+            assert titles(app.day) == [["Practice"]]
+
+    asyncio.run(delete_twice())
 
 
 def test_braces_jump_between_sections_like_paragraphs(app):

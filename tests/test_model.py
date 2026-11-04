@@ -225,7 +225,6 @@ def test_report_matches_the_original_calculations():
     assert percentage(ratio(earned, available) - ratio(elapsed, total)) == "9.52"
     assert per_point(total, available) == 15 * 60
     assert per_point(total - elapsed, available - earned) == 17 * 60 + 30
-    assert percentage(ratio(0, 0)) == "n/a"
     assert per_point(0, Fraction(0)) is None
 
 

@@ -75,7 +75,6 @@ class Store:
 
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.path = path
         self.connection = sqlite3.connect(path, timeout=0)
         try:
             # exclusive locking mode keeps the lock from the first transaction
