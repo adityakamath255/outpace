@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import sys
 from dataclasses import replace
 from datetime import date, datetime
 from io import StringIO
@@ -16,6 +17,7 @@ from todo.app import (
     TodoApp,
     arrange,
     duration,
+    main,
     schedule_status,
 )
 from todo.db import Store
@@ -211,7 +213,7 @@ def test_failed_save_keeps_form_and_does_not_change_history(app, monkeypatch):
             assert app.screen.query_one(Input).value == "2.5"
             assert "disk I/O" in str(app.screen.query_one("#error", Static).content)
             assert app.day == original
-            assert not app.history
+            assert not app.histories.get(app.day.date)
             assert app.store.load(original.date) == original
 
     asyncio.run(fail_save())
@@ -292,7 +294,7 @@ def test_plus_and_minus_step_points_and_undo_names_the_change(app, monkeypatch):
             assert app.selected()[1].earned == 3
             await pilot.press("minus", "minus", "minus", "minus")
             assert app.selected()[1].earned == 0
-            assert len(app.history) == 4
+            assert len(app.histories[app.day.date]) == 4
             await pilot.press("u")
             assert app.selected()[1].earned == 1
             assert messages == ["Undid: changed Practice from 1/5 to 0/5"]
@@ -377,10 +379,10 @@ def test_day_switching_preserves_lists_and_creates_new_days(app):
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.press("space")
             edited = app.day
-            assert app.history
+            assert app.histories[app.day.date]
             await pilot.press("[")
             assert app.day == earlier
-            assert not app.history
+            assert not app.histories.get(app.day.date)
             assert earlier.date.isoformat() in str(app.query_one("#date").content)
             assert app.store.load(original.date) == edited
 
@@ -465,7 +467,7 @@ def test_failed_day_load_keeps_current_list_history_and_date_draft(app, monkeypa
             await pilot.press("enter")
             assert not isinstance(app.screen, ModalScreen)
             assert app.day.date == target
-            assert not app.history
+            assert not app.histories.get(app.day.date)
 
     asyncio.run(fail_open())
 
@@ -781,3 +783,17 @@ def test_plan_shows_spare_or_over_scheduled_time(app):
             assert "1h" in line("over")
 
     asyncio.run(plan())
+
+
+@pytest.mark.parametrize("value", ["20261102", "2026-W45-1"])
+def test_command_line_rejects_dates_the_date_prompt_rejects(
+    value, tmp_path, monkeypatch
+):
+    database = tmp_path / "todo.sqlite3"
+    monkeypatch.setattr(
+        sys, "argv", ["todo", "--database", str(database), "--date", value]
+    )
+    monkeypatch.setattr(TodoApp, "run", lambda self: None)
+    with pytest.raises(SystemExit) as raised:
+        main()
+    assert raised.value.code == 2

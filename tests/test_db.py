@@ -33,7 +33,7 @@ def test_list_dates_returns_saved_days_newest_first_and_copies_coexist(tmp_path)
 def test_days_survive_reopening(tmp_path):
     path = tmp_path / "nested" / "todo.sqlite3"
     store = Store(path)
-    task = Task("Practice", points("2.5"), points("0.125"), 2**63 - 1)
+    task = Task("Practice", points("2.5"), points("0.125"), 24 * 60)
     day = replace(empty_day(DAY), sections=(Section("Tasks", (task,)),))
     store.save(day)
     store.close()

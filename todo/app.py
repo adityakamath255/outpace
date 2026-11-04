@@ -679,10 +679,6 @@ class TodoApp(App):
         self.sort: Sort | None = None
         self.day = store.load(list_date)
 
-    @property
-    def history(self) -> tuple[Change, ...]:
-        return tuple(self.histories.get(self.day.date, ()))
-
     def on_notify(self) -> None:
         # textual has no public limit on toasts, and this handler runs before
         # textual's own adds the new one, so trim once the message is handled
@@ -1176,7 +1172,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--date",
-        type=date.fromisoformat,
+        type=parse_date,
         default=date.today(),
         help="list date, YYYY-MM-DD (default: today)",
     )

@@ -42,17 +42,10 @@ def test_tasks_reject_nonpositive_estimates():
         Task("Practice", None, minutes=0)
 
 
-def test_estimates_stop_at_the_largest_stored_integer():
-    largest = 2**63 - 1
-    assert parse_minutes(str(largest)) == largest
-    assert Task("Practice", None, minutes=largest).minutes == largest
-    with pytest.raises(ValueError, match=r"^Estimate too large\.$"):
-        Task("Practice", None, minutes=largest + 1)
-
-
-def test_estimates_exceeding_the_integer_conversion_limit_are_too_large():
-    with pytest.raises(ValueError, match=r"^Estimate too large\.$"):
-        parse_minutes("9" * 5000)
+def test_estimates_are_capped_at_a_day():
+    assert Task("Practice", None, minutes=24 * 60).minutes == 24 * 60
+    with pytest.raises(ValueError, match=r"^An estimate cannot exceed 24 hours\.$"):
+        Task("Practice", None, minutes=24 * 60 + 1)
 
 
 def test_new_days_have_no_schedule():

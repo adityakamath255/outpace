@@ -8,10 +8,7 @@ from itertools import pairwise
 from typing import Literal
 from uuid import uuid4
 
-# sqlite stores integers in at most 64 signed bits
-MAX_MINUTES = 2**63 - 1
 _MINUTES_ERROR = "Use a positive whole number of minutes."
-_MINUTES_TOO_LARGE = "Estimate too large."
 _CLOCK_ERROR = "Use a 24-hour time in H:MM or HH:MM format."
 DAY_MINUTES = 24 * 60
 
@@ -34,11 +31,7 @@ def parse_minutes(value: str) -> int | None:
         return None
     if not value.isdecimal():
         raise ValueError(_MINUTES_ERROR)
-    try:
-        return int(value)
-    except ValueError as error:
-        # past the interpreter's limit on digits in a string conversion
-        raise ValueError(_MINUTES_TOO_LARGE) from error
+    return int(value)
 
 
 @dataclass(frozen=True)
@@ -67,8 +60,9 @@ class Task:
         if self.minutes is not None:
             if self.minutes <= 0:
                 raise ValueError(_MINUTES_ERROR)
-            if self.minutes > MAX_MINUTES:
-                raise ValueError(_MINUTES_TOO_LARGE)
+            # a list's schedule spans at most a day, so a longer task cannot fit it
+            if self.minutes > DAY_MINUTES:
+                raise ValueError("An estimate cannot exceed 24 hours.")
 
     @property
     def complete(self) -> bool:
