@@ -490,7 +490,7 @@ def test_schedule_edit_saves_recalculates_and_undoes(app):
 
     async def edit_schedule():
         async with app.run_test(size=(110, 45)) as pilot:
-            await pilot.press("s")
+            await pilot.press("at")
             field = app.screen.query_one(Input)
             assert field.value == "07:30 - 11:00, 16:00 - 23:00"
             field.value = "09:00-12:00, 23:00-01:00, 01:30-02:00"
@@ -513,11 +513,11 @@ def test_schedule_edit_saves_recalculates_and_undoes(app):
 def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):
     async def clear_schedule():
         async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.press("s", "ctrl+u", "enter")
+            await pilot.press("at", "ctrl+u", "enter")
             assert app.day.intervals == ()
             assert "not set" in stats_text(app)
             assert app.store.load(app.day.date) == app.day
-            await pilot.press("s", *"08:00-09:00", "enter")
+            await pilot.press("at", *"08:00-09:00", "enter")
             assert app.day.intervals == (Interval(8 * 60, 9 * 60),)
 
     asyncio.run(clear_schedule())
@@ -746,7 +746,7 @@ def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
     async def sort():
         async with app.run_test(size=(110, 45)) as pilot:
             # the menu lists stored order, then each column both ways
-            await pilot.press("S", *"jjjjj", "enter")
+            await pilot.press("s", *"jjjjj", "enter")
             assert shown() == [b.id, a.id, c.id]
             # what works on stored order or sections is refused while sorted
             await pilot.press("J", "}", "number_sign", "o", "O", "p")
@@ -797,3 +797,41 @@ def test_command_line_rejects_dates_the_date_prompt_rejects(
     with pytest.raises(SystemExit) as raised:
         main()
     assert raised.value.code == 2
+
+
+def test_f_hides_done_tasks_in_both_views_until_pressed_again(app):
+    d1, p = Task("d1", None, checked=True), Task("p", points("3"), points("1"))
+    d2, q = Task("d2", points("2"), points("2")), Task("q", points("1"))
+    a, b = Section("A", (d1, p)), Section("B", (d2, q))
+    day = replace(app.day, sections=(a, b))
+    app.store.save(day)
+    app = TodoApp(app.store, day.date)
+
+    def shown():
+        return [option.id for option in app.query_one("#tasks").options]
+
+    async def filter_done():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("f")
+            assert shown() == [a.id, p.id, b.id, q.id]
+            assert "2 done hidden" in str(app.query_one("#date").content)
+            # a move could swap with a hidden task, so it is refused
+            await pilot.press("g", "j", "J")
+            assert app.day == day
+            # sorted by most points first: as many tasks as sections
+            await pilot.press("s", "j", "j", "j", "enter")
+            assert shown() == [p.id, q.id]
+            assert not app.query_one("#empty").display
+            await pilot.press("s", "g", "enter")
+            # finishing tasks hides them; with nothing left, say so
+            await pilot.press("g", "j", "plus", "plus")
+            assert shown() == [a.id, b.id, q.id]
+            app.query_one("#tasks").highlighted = 2
+            await pilot.press("space")
+            assert shown() == [a.id, b.id]
+            assert app.query_one("#empty").display
+            await pilot.press("f")
+            assert len(shown()) == 6
+            assert "hidden" not in str(app.query_one("#date").content)
+
+    asyncio.run(filter_done())
