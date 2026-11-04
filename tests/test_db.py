@@ -55,7 +55,7 @@ def test_blank_days_are_not_stored(tmp_path):
     day = planned(DAY)
     with closing(Store(tmp_path / "todo.sqlite3")) as store:
         store.save(day)
-        store.save(day.remove_task(next(day.tasks())[1].id))
+        store.save(day.remove_task(next(day.tasks()).id))
         assert store.list_dates() == (DAY,)
         store.save(empty_day(DAY))
         assert store.list_dates() == ()

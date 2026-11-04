@@ -24,6 +24,11 @@ Screen {
     padding: 0 2 0 1;
 }
 
+/* the space under the column names, which the list may fill but not exceed */
+#list-area {
+    height: 1fr;
+}
+
 VimList {
     height: auto;
     max-height: 100%;

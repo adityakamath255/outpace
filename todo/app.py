@@ -358,7 +358,7 @@ def plan(day: Day, tasks: list[Task]) -> Group:
 
 def stats(day: Day, now: datetime, width: int, full_title: str | None) -> Group:
     width = min(width, BAR_WIDTH)
-    tasks = [task for _, task in day.tasks()]
+    tasks = list(day.tasks())
     earned, available = score(tasks)
     value = Text(f"{number(earned)} / {number(available)}", style="bold")
     blocks: list[RenderableType] = [
@@ -735,8 +735,9 @@ class TodoApp(App):
         with Horizontal(id="body"):
             with Vertical(id="task-pane"):
                 yield Static(header_row(None), id="columns")
-                yield VimList(id="tasks")
-                yield Static("", id="empty")
+                with Vertical(id="list-area"):
+                    yield VimList(id="tasks")
+                    yield Static("", id="empty")
             yield Static("", id="stats")
         yield Footer(compact=True)
 
@@ -809,11 +810,11 @@ class TodoApp(App):
         return tuple(task for task in tasks if not task.complete)
 
     def all_shown(self) -> tuple[Task, ...]:
-        return self.shown(task for _, task in self.day.tasks())
+        return self.shown(self.day.tasks())
 
     def hidden_count(self) -> int:
         """How many done tasks the filter hides."""
-        return sum(t.complete for _, t in self.day.tasks()) if self.hide_done else 0
+        return sum(t.complete for t in self.day.tasks()) if self.hide_done else 0
 
     def sorted_tasks(self) -> tuple[Task, ...] | None:
         """Every shown task in sorted order, or None while the list shows
@@ -840,7 +841,7 @@ class TodoApp(App):
         old = widget.highlighted_option
         selection = selection or (old.id if old else None)
         old_index = widget.highlighted
-        _, total = score(task for _, task in self.day.tasks())
+        _, total = score(self.day.tasks())
         ordered = self.sorted_tasks()
         if ordered is not None:
             options = [Option(task_row(task), id=task.id) for task in ordered]

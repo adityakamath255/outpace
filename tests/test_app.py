@@ -100,9 +100,7 @@ def test_task_changes_save_and_undo(app):
             await pilot.pause()
             assert await pilot.click(footer_action(app, "add(True)"))
             await pilot.press(*"2.5", "tab", *"20", "tab", *"read daily", "enter")
-            added = next(
-                task for _, task in app.day.tasks() if task.title == "read daily"
-            )
+            added = next(task for task in app.day.tasks() if task.title == "read daily")
             assert (added.available, added.earned, added.minutes) == (
                 points("2.5"),
                 0,
@@ -116,7 +114,7 @@ def test_task_changes_save_and_undo(app):
             await pilot.press("enter")
             await pilot.press(*"2.5", "enter")
             assert next(
-                task for _, task in app.day.tasks() if task.id == added.id
+                task for task in app.day.tasks() if task.id == added.id
             ).complete
 
             before_cancel = app.day
@@ -127,7 +125,7 @@ def test_task_changes_save_and_undo(app):
             await pilot.press("e")
             app.screen.query_one("#minutes", Input).value = "35"
             await pilot.press("enter")
-            edited = next(task for _, task in app.day.tasks() if task.id == added.id)
+            edited = next(task for task in app.day.tasks() if task.id == added.id)
             assert edited.minutes == 35
             assert edited.earned == points("2.5")
 
@@ -139,14 +137,14 @@ def test_task_changes_save_and_undo(app):
 
             await pilot.press("space")
             assert (
-                next(task for _, task in app.day.tasks() if task.id == added.id).earned
+                next(task for task in app.day.tasks() if task.id == added.id).earned
                 == 0
             )
             await pilot.press("u")
             assert app.day == before_move
 
             assert await pilot.click(footer_action(app, "delete"))
-            assert all(task.id != added.id for _, task in app.day.tasks())
+            assert all(task.id != added.id for task in app.day.tasks())
             await pilot.press("u")
             assert app.day == before_move
 
@@ -194,7 +192,7 @@ def test_reuse_copies_a_saved_day_and_undo_restores_the_destination(app, existin
             assert not isinstance(app.screen, ModalScreen)
             copied = app.day
             assert copied.date == destination.date
-            assert next(copied.tasks())[1].earned == 0
+            assert next(copied.tasks()).earned == 0
             assert copied.intervals == source.intervals
             assert app.store.load(source.date) == source
             assert app.store.load(copied.date) == copied
@@ -382,7 +380,7 @@ def test_day_switching_preserves_lists_and_creates_new_days(app):
             assert app.store.load(tomorrow.date).blank
             await add_task(pilot, "New task")
             assert app.store.load(tomorrow.date) == app.day
-            assert next(app.day.tasks())[1].title == "New task"
+            assert next(app.day.tasks()).title == "New task"
 
             await pilot.press("T", *original.date.isoformat(), "enter")
             assert not isinstance(app.screen, ModalScreen)
@@ -604,7 +602,7 @@ def test_put_copies_the_last_deleted_row_and_resets_progress_on_other_days(app):
     practice = app.day.sections[0].tasks[0]
 
     def copies(day):
-        return [replace(task, id=practice.id) for _, task in day.tasks()]
+        return [replace(task, id=practice.id) for task in day.tasks()]
 
     async def put():
         async with app.run_test(size=(110, 45)) as pilot:
@@ -612,7 +610,7 @@ def test_put_copies_the_last_deleted_row_and_resets_progress_on_other_days(app):
             assert titles(app.day) == [["Practice"]]
             await pilot.press("x", "p", "P")
             assert copies(app.day) == [practice, practice]
-            ids = [task.id for _, task in app.day.tasks()]
+            ids = [task.id for task in app.day.tasks()]
             assert len(set(ids)) == 2 and practice.id not in ids
             await pilot.press("]", "p")
             assert copies(app.day) == [replace(practice, earned=0)]
@@ -674,6 +672,22 @@ def test_the_cursor_never_rests_on_a_subtotal(app):
             assert app.selected()[1] == b
 
     asyncio.run(move())
+
+
+def test_a_long_list_ends_above_the_footer(app):
+    tasks = tuple(Task(f"task {n}", None) for n in range(60))
+    app.store.save(replace(app.day, sections=(Section("Many", tasks),)))
+    app = TodoApp(app.store, app.day.date)
+
+    async def scroll_to_end():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("G")
+            # the column names share the pane, so the list cannot take all of it
+            assert (
+                app.query_one("#tasks").region.bottom <= app.query_one(Footer).region.y
+            )
+
+    asyncio.run(scroll_to_end())
 
 
 def test_ctrl_d_and_ctrl_u_move_half_a_page(app):

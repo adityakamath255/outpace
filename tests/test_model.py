@@ -90,12 +90,12 @@ def test_copy_day_preserves_the_plan_and_resets_progress_with_new_identities():
     assert copied.intervals == source.intervals
     assert [section.title for section in copied.sections] == ["Tasks", "Empty"]
     assert not copied.sections[1].tasks
-    for (_, original), (_, task) in zip(source.tasks(), copied.tasks(), strict=True):
+    for original, task in zip(source.tasks(), copied.tasks(), strict=True):
         assert task == replace(original, id=task.id, earned=Fraction(0))
-    original_ids = {s.id for s in source.sections} | {t.id for _, t in source.tasks()}
-    copied_ids = {s.id for s in copied.sections} | {t.id for _, t in copied.tasks()}
+    original_ids = {s.id for s in source.sections} | {t.id for t in source.tasks()}
+    copied_ids = {s.id for s in copied.sections} | {t.id for t in copied.tasks()}
     assert original_ids.isdisjoint(copied_ids)
-    assert next(source.tasks())[1].earned == points("0.75")
+    assert next(source.tasks()).earned == points("0.75")
 
 
 def test_rename_section_preserves_other_day_data_and_allows_duplicate_titles():
@@ -240,7 +240,7 @@ def test_edit_move_remove_and_complete_preserve_task_identity():
     assert completed.complete and completed.id == first.id
     changed = day.replace_task(completed)
     assert changed.sections[0].tasks == (completed, second)
-    assert score(task for _, task in changed.remove_task(first.id).tasks()) == (0, 2)
+    assert score(changed.remove_task(first.id).tasks()) == (0, 2)
     assert first.earned == 1
 
 

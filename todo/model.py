@@ -216,7 +216,7 @@ class Day:
         if any(a.end > b.start for a, b in pairwise(ordered)):
             raise ValueError("Scheduled intervals cannot overlap.")
         ids = [section.id for section in self.sections]
-        ids += [task.id for _, task in self.tasks()]
+        ids += [task.id for task in self.tasks()]
         if len(ids) != len(set(ids)):
             raise ValueError("Task and section identities must be unique.")
 
@@ -230,8 +230,8 @@ class Day:
             and not self.sections[0].tasks
         )
 
-    def tasks(self) -> Iterator[tuple[Section, Task]]:
-        return ((section, task) for section in self.sections for task in section.tasks)
+    def tasks(self) -> Iterator[Task]:
+        return (task for section in self.sections for task in section.tasks)
 
     def copy_to(self, list_date: date) -> Day:
         sections = tuple(s.duplicate(keep_progress=False) for s in self.sections)
