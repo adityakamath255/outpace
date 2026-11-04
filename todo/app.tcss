@@ -176,8 +176,13 @@ Toast {
     margin-right: 2;
 }
 
-#available, #minutes {
+#available {
     width: 7;
+}
+
+/* room for 23h59m and the cursor */
+#minutes {
+    width: 9;
 }
 
 #task-fields #title {

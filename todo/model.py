@@ -8,7 +8,7 @@ from itertools import pairwise
 from typing import Literal
 from uuid import uuid4
 
-_MINUTES_ERROR = "Use a positive whole number of minutes."
+_DURATION_ERROR = "Use minutes, like 90, or hours and minutes, like 1h30m."
 _CLOCK_ERROR = "Use a 24-hour time in H:MM or HH:MM format."
 DAY_MINUTES = 24 * 60
 
@@ -25,13 +25,18 @@ def points(value: str) -> Fraction:
 
 
 def parse_minutes(value: str) -> int | None:
-    """Reads an estimate; Task decides which estimates are allowed."""
-    value = value.strip()
+    """Reads a duration in minutes, from 90 or 1h30m; Task decides which
+    durations are allowed."""
+    value = value.strip().lower()
     if not value:
         return None
-    if not value.isdecimal():
-        raise ValueError(_MINUTES_ERROR)
-    return int(value)
+    if re.fullmatch(r"[0-9]+", value):
+        return int(value)
+    match = re.fullmatch(r"(?:([0-9]+)h)?\s*(?:([0-9]+)m)?", value)
+    if not match or not any(match.groups()):
+        raise ValueError(_DURATION_ERROR)
+    hours, minutes = (int(part or 0) for part in match.groups())
+    return hours * 60 + minutes
 
 
 @dataclass(frozen=True)
@@ -59,10 +64,10 @@ class Task:
             raise ValueError("Unscored tasks cannot have earned points.")
         if self.minutes is not None:
             if self.minutes <= 0:
-                raise ValueError(_MINUTES_ERROR)
+                raise ValueError("A duration must be positive.")
             # a list's schedule spans at most a day, so a longer task cannot fit it
             if self.minutes > DAY_MINUTES:
-                raise ValueError("An estimate cannot exceed 24 hours.")
+                raise ValueError("A duration cannot exceed 24 hours.")
 
     @property
     def complete(self) -> bool:

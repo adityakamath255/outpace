@@ -50,7 +50,7 @@ from .model import (
 # failures shown to the user while the draft or the list stays as it was
 RECOVERABLE = (ValueError, sqlite3.Error, OSError)
 
-# marker, earned, available, estimate, time per point; the title takes the rest
+# marker, earned, available, duration, time per point; the title takes the rest
 CELL_WIDTHS = (1, 5, 4, 6, 8)
 FIXED_WIDTH = sum(CELL_WIDTHS) + len(CELL_WIDTHS)
 BAR_WIDTH = 32
@@ -135,10 +135,10 @@ COLUMNS = (
         ("fewest points first", "most points first"),
     ),
     Column(
-        "est",
+        "dur",
         lambda task: task.minutes,
         False,
-        ("shortest estimate first", "longest estimate first"),
+        ("shortest duration first", "longest duration first"),
     ),
     Column(
         "t/pt",
@@ -312,7 +312,7 @@ def schedule_blocks(
 
 
 def plan(day: Day, tasks: list[Task]) -> Group:
-    """The schedule against the estimates: how much time the plan leaves."""
+    """The schedule against the task durations: how much time the plan leaves."""
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="dim", no_wrap=True)
     grid.add_column()
@@ -323,24 +323,24 @@ def plan(day: Day, tasks: list[Task]) -> Group:
         grid.add_row("schedule" if index == 0 else "", text)
     if not day.intervals:
         grid.add_row("schedule", Text("not set (@)", style="dim"))
-    estimates = [task.minutes for task in tasks if task.minutes is not None]
+    durations = [task.minutes for task in tasks if task.minutes is not None]
     blocks: list[RenderableType] = [grid]
-    if estimates:
-        estimated = sum(estimates) * 60
-        grid.add_row("estimated", duration(estimated))
+    if durations:
+        needed = sum(durations) * 60
+        grid.add_row("needed", duration(needed))
         scheduled = sum(interval.seconds for interval in day.intervals)
         # the word carries the meaning; colour only backs it up
-        if scheduled and estimated <= scheduled:
-            grid.add_row(Text("spare", style="blue"), duration(scheduled - estimated))
+        if scheduled and needed <= scheduled:
+            grid.add_row(Text("spare", style="blue"), duration(scheduled - needed))
         elif scheduled:
-            over = duration(estimated - scheduled)
+            over = duration(needed - scheduled)
             over.stylize("yellow")
             grid.add_row(Text("over", style="bold yellow"), over)
         missing = sum(
             task.minutes is None and task.available is not None for task in tasks
         )
         if missing:
-            blocks.append(Text(f"{missing} scored without an estimate", style="dim"))
+            blocks.append(Text(f"{missing} scored without a duration", style="dim"))
     return Group(*blocks)
 
 
@@ -520,6 +520,12 @@ class TaskEditor(Form):
     """Edits one task, or adds tasks one after another until closed; on_submit
     saves each, raising a RECOVERABLE error to keep the draft."""
 
+    # what a field accepts, told in the hint while it has focus
+    FIELD_HINTS = {
+        "available": "blank for unscored",
+        "minutes": "minutes, or like 1h30m",
+    }
+
     def __init__(
         self, task: Task | None, heading: str, on_submit: Callable[[Task], None]
     ):
@@ -527,13 +533,13 @@ class TaskEditor(Form):
         self.edited_task = task
         self.heading = heading
         self.on_submit = on_submit
+        if task:
+            self.keys = "⏎ save · esc cancel"
+        else:
+            self.keys = "⏎ add and start the next · esc close"
 
     def compose(self) -> ComposeResult:
         task = self.edited_task
-        if task:
-            hint = "⏎ save · esc cancel · blank points for unscored"
-        else:
-            hint = "⏎ add and start the next · esc close · blank points for unscored"
         with Vertical(classes="dialog", id="task-dialog"):
             yield Label(self.heading, classes="dialog-title", markup=False)
             with Horizontal(id="task-fields"):
@@ -546,9 +552,11 @@ class TaskEditor(Form):
                     compact=True,
                     select_on_focus=False,
                 )
-                yield Label("min")
+                yield Label("duration")
                 yield Input(
-                    str(task.minutes) if task and task.minutes else "",
+                    duration(task.minutes * 60).plain
+                    if task and task.minutes is not None
+                    else "",
                     id="minutes",
                     compact=True,
                     select_on_focus=False,
@@ -563,7 +571,12 @@ class TaskEditor(Form):
             yield Static("", id="error", markup=False)
             # the list is hidden behind the dialog, so confirm each added task
             yield Static("", id="added", classes="muted", markup=False)
-            yield Static(hint, classes="muted hint", markup=False)
+            yield Static(self.keys, id="hint", classes="muted hint", markup=False)
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        note = self.FIELD_HINTS.get(event.widget.id or "")
+        hint = f"{self.keys} · {note}" if note else self.keys
+        self.query_one("#hint", Static).update(hint)
 
     def save(self) -> None:
         available_text = self.query_one("#available", Input).value.strip()

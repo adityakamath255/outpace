@@ -774,7 +774,7 @@ def test_plan_shows_spare_or_over_scheduled_time(app):
     async def plan():
         async with app.run_test():
             assert "07:30 - 11:00" in line("schedule")
-            assert "30m" in line("estimated")
+            assert "30m" in line("needed")
             assert "10h" in line("spare")
             app.save_change(
                 app.day.insert_task(Task("Long", None, minutes=660), section.id, 0),

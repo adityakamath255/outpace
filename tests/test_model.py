@@ -26,25 +26,38 @@ DAY = date(2026, 11, 1)
 HOUR = 3600
 
 
-def test_minutes_parser_accepts_blank_or_positive_whole_minutes():
-    assert parse_minutes(" \t ") is None
-    assert parse_minutes(" 40 ") == 40
+@pytest.mark.parametrize(
+    ("text", "minutes"),
+    [
+        (" \t ", None),
+        (" 40 ", 40),
+        ("1h30m", 90),
+        ("1H 30M", 90),
+        ("2h", 120),
+        ("45m", 45),
+    ],
+)
+def test_duration_parser_accepts_minutes_or_hours_and_minutes(text, minutes):
+    assert parse_minutes(text) == minutes
 
 
-@pytest.mark.parametrize("text", ["1.5", "-1"])
-def test_minutes_parser_rejects_invalid_estimates(text):
-    with pytest.raises(ValueError, match=r"^Use a positive whole number of minutes\.$"):
+@pytest.mark.parametrize("text", ["1.5", "-1", "h", "1m30h", "1h30"])
+def test_duration_parser_rejects_other_formats(text):
+    with pytest.raises(
+        ValueError,
+        match=r"^Use minutes, like 90, or hours and minutes, like 1h30m\.$",
+    ):
         parse_minutes(text)
 
 
-def test_tasks_reject_nonpositive_estimates():
-    with pytest.raises(ValueError, match=r"^Use a positive whole number of minutes\.$"):
+def test_tasks_reject_nonpositive_durations():
+    with pytest.raises(ValueError, match=r"^A duration must be positive\.$"):
         Task("Practice", None, minutes=0)
 
 
-def test_estimates_are_capped_at_a_day():
+def test_durations_are_capped_at_a_day():
     assert Task("Practice", None, minutes=24 * 60).minutes == 24 * 60
-    with pytest.raises(ValueError, match=r"^An estimate cannot exceed 24 hours\.$"):
+    with pytest.raises(ValueError, match=r"^A duration cannot exceed 24 hours\.$"):
         Task("Practice", None, minutes=24 * 60 + 1)
 
 
