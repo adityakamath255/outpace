@@ -9,6 +9,7 @@ from typing import Literal
 from uuid import uuid4
 
 _DURATION_ERROR = "Use minutes, like 90, or hours and minutes, like 1h30m."
+_UNSCORED_ERROR = "Unscored tasks have no done state."
 _CLOCK_ERROR = "Use a 24-hour time in H:MM or HH:MM format."
 DAY_MINUTES = 24 * 60
 
@@ -42,10 +43,10 @@ def parse_minutes(value: str) -> int | None:
 @dataclass(frozen=True)
 class Task:
     title: str
+    # None makes an unscored task: a plain list item, never done or not done
     available: Fraction | None
     earned: Fraction = Fraction(0)
     minutes: int | None = None
-    checked: bool = False
     id: str = field(default_factory=identifier)
 
     def __post_init__(self) -> None:
@@ -58,8 +59,6 @@ class Task:
                     "Available points must be positive; earned points must be "
                     "between zero and available points."
                 )
-            if self.checked:
-                raise ValueError("Scored tasks derive completion from their points.")
         elif self.earned:
             raise ValueError("Unscored tasks cannot have earned points.")
         if self.minutes is not None:
@@ -71,43 +70,35 @@ class Task:
 
     @property
     def complete(self) -> bool:
-        return self.checked if self.available is None else self.earned == self.available
+        return self.available is not None and self.earned == self.available
 
     def toggle(self) -> Task:
         if self.available is None:
-            return replace(self, checked=not self.checked)
+            raise ValueError(_UNSCORED_ERROR)
         return replace(self, earned=Fraction(0) if self.complete else self.available)
 
     def edit(self, title: str, available: Fraction | None, minutes: int | None) -> Task:
         """Change a task's plan: a done task stays done, and partial progress is
         capped at the new available points."""
         if available is None:
-            return replace(
-                self,
-                title=title,
-                available=None,
-                earned=Fraction(0),
-                minutes=minutes,
-                checked=self.complete,
-            )
+            earned = Fraction(0)
+        elif self.complete:
+            earned = available
+        else:
+            earned = min(self.earned, available)
         return replace(
-            self,
-            title=title,
-            available=available,
-            earned=available if self.complete else min(self.earned, available),
-            minutes=minutes,
-            checked=False,
+            self, title=title, available=available, earned=earned, minutes=minutes
         )
 
     def duplicate(self, *, keep_progress: bool) -> Task:
         """The same plan under a new identity, with or without its progress."""
         if keep_progress:
             return replace(self, id=identifier())
-        return replace(self, id=identifier(), earned=Fraction(0), checked=False)
+        return replace(self, id=identifier(), earned=Fraction(0))
 
     def step(self, delta: int) -> Task:
         if self.available is None:
-            return replace(self, checked=delta > 0)
+            raise ValueError(_UNSCORED_ERROR)
         return replace(
             self, earned=min(max(self.earned + delta, Fraction(0)), self.available)
         )
@@ -386,11 +377,11 @@ def number(value: Fraction) -> str:
         )
 
 
-def percentage(value: Fraction | None, *, signed: bool = False) -> str:
+def percentage(value: Fraction | None) -> str:
     if value is None:
         return "n/a"
     hundredths = int(value * 10_000)
-    sign = "-" if hundredths < 0 else "+" if signed else ""
+    sign = "-" if hundredths < 0 else ""
     whole, decimal = divmod(abs(hundredths), 100)
     return f"{sign}{whole}.{decimal:02d}"
 

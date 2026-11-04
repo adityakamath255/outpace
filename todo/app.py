@@ -9,6 +9,7 @@ from typing import Literal, NamedTuple
 
 from platformdirs import user_data_path
 from rich.console import Console, ConsoleOptions, Group, RenderableType, RenderResult
+from rich.rule import Rule
 from rich.table import Table
 from rich.text import Text
 from textual import events, on
@@ -29,7 +30,6 @@ from .db import Store
 from .model import (
     DAY_MINUTES,
     Day,
-    Interval,
     Section,
     Task,
     format_schedule,
@@ -70,7 +70,7 @@ def duration(seconds: int) -> Text:
 
 def pace(seconds: int, available: Fraction) -> Text:
     value = per_point(seconds, available)
-    return Text("n/a") if value is None else duration(value)
+    return Text("-") if value is None else duration(value)
 
 
 def row(cells: tuple[Text | str, ...], title: Text | str) -> Table:
@@ -102,9 +102,9 @@ def task_row(task: Task) -> Table:
     return row(cells, Text(task.title))
 
 
-def completion(task: Task) -> Fraction:
+def completion(task: Task) -> Fraction | None:
     if task.available is None:
-        return Fraction(task.checked)
+        return None
     return task.earned / task.available
 
 
@@ -193,7 +193,9 @@ def column_at(x: int) -> Column | None:
     return None
 
 
-def header_row(sort: Sort | None) -> Table:
+def header_row(sort: Sort | None) -> RenderableType:
+    """The column names; sorted, a rule under them stands in for the first
+    section's rule."""
     cells: list[Text | str] = [""]
     for column in COLUMNS:
         if sort is not None and sort.column is column:
@@ -201,32 +203,30 @@ def header_row(sort: Sort | None) -> Table:
             cells.append(Text(column.header + arrow, style="bold"))
         else:
             cells.append(Text(column.header, style="dim"))
-    return row(tuple(cells), "")
+    names = row(tuple(cells), "")
+    return names if sort is None else Group(names, Rule(style="dim"))
 
 
 def section_label(section: Section) -> str:
     return f"section {section.title}" if section.title else "an untitled section"
 
 
-def section_summary(section: Section, total: Fraction) -> tuple[str, ...]:
-    """The summary parts of a section's rule, most important first."""
-    if not section.tasks:
-        return ()
-    earned, available = score(section.tasks)
-    if available:
-        share = f"{percentage(ratio(available, total))}% of total"
-        return f"{number(earned)}/{number(available)}", share
-    return (
-        f"{sum(task.complete for task in section.tasks)}/{len(section.tasks)} done",
-    )
+def section_share(section: Section, total: Fraction) -> str:
+    """The section's part of the day's points, or nothing when that says
+    nothing: no points, or all of them."""
+    _, available = score(section.tasks)
+    share = ratio(available, total)
+    if not available or share == 1:
+        return ""
+    return f"{percentage(share)}% of total"
 
 
 class SectionRule:
-    """A rule line that starts a section: ── title ─────── summary ──"""
+    """A rule line that starts a section: ── title ─────── share ──"""
 
     def __init__(self, section: Section, total: Fraction):
         self.title = section.title
-        self.summary = section_summary(section, total)
+        self.share = section_share(section, total)
 
     def __rich_console__(
         self, console: Console, options: ConsoleOptions
@@ -237,15 +237,42 @@ class SectionRule:
             left.append(" ")
             left.append(self.title, style="bold")
             left.append(" ")
-        # the title identifies the row, so the summary gives way first
-        for count in range(len(self.summary), -1, -1):
-            parts = "  ".join(self.summary[:count])
-            right = Text(f" {parts} ──" if parts else "──", style="dim")
-            if left.cell_len + right.cell_len < width:
-                break
+        right = Text(f" {self.share} ──" if self.share else "──", style="dim")
+        # the title identifies the row, so the share gives way first
+        if left.cell_len + right.cell_len >= width:
+            right = Text("──", style="dim")
         left.truncate(max(width - right.cell_len - 1, 3))
         fill = max(width - left.cell_len - right.cell_len, 1)
         yield left + Text("─" * fill, style="dim") + right
+
+
+def subtotal_row(section: Section) -> Table | None:
+    """A section's totals in the task columns, or None with nothing to total.
+
+    Time per point counts only tasks with both a duration and points."""
+    earned, available = score(section.tasks)
+    minutes = sum(task.minutes or 0 for task in section.tasks)
+    if not available and not minutes:
+        return None
+    paced = [
+        (task.minutes, task.available)
+        for task in section.tasks
+        if task.minutes and task.available is not None
+    ]
+    paced_points = sum((points for _, points in paced), Fraction(0))
+    style = "bold"
+    cells = (
+        "",
+        Text(number(earned) if available else "", style=style),
+        Text(number(available) if available else "", style=style),
+        # unit letters stay undimmed, so the totals read as one block
+        Text(duration(minutes * 60).plain if minutes else "", style=style),
+        Text(
+            pace(sum(m for m, _ in paced) * 60, paced_points).plain if paced else "",
+            style=style,
+        ),
+    )
+    return row(cells, Text("subtotal", style=style))
 
 
 def meter(
@@ -265,19 +292,6 @@ def meter(
     return text
 
 
-def schedule_status(intervals: tuple[Interval, ...], now: int) -> str:
-    """now is seconds_into the list's day."""
-    if not intervals:
-        return "No schedule"
-    if now < min(interval.start for interval in intervals) * 60:
-        return "Not started"
-    if now >= max(interval.end for interval in intervals) * 60:
-        return "Schedule ended"
-    if any(i.start * 60 <= now < i.end * 60 for i in intervals):
-        return "In progress"
-    return "Between intervals"
-
-
 def schedule_blocks(
     day: Day, now: datetime, earned: Fraction, available: Fraction, width: int
 ) -> list[RenderableType]:
@@ -285,30 +299,27 @@ def schedule_blocks(
     elapsed, total = time_progress(day.intervals, now_seconds)
     progress, time_ratio = ratio(earned, available), ratio(elapsed, total)
     value = duration(elapsed) + Text(" / ") + duration(total)
-    status = Text()
+    blocks: list[RenderableType] = [meter("time", value, time_ratio, "cyan", width)]
     if progress is not None and time_ratio is not None:
         difference = progress - time_ratio
-        # the sign carries the meaning; colour only backs it up
-        if difference > 0:
-            style, word = "bold blue", "ahead"
-        elif difference < 0:
-            style, word = "bold yellow", "behind"
+        # the word gives the direction, so the number goes unsigned
+        if difference:
+            word = "ahead" if difference > 0 else "behind"
+            line = f"{percentage(abs(difference))} pp {word}"
         else:
-            style, word = "bold", "on pace"
-        status.append(f"{percentage(difference, signed=True)} pp {word}\n", style=style)
-    status.append(schedule_status(day.intervals, now_seconds).lower())
-    if not total:
-        remaining = Text("n/a")
-    elif elapsed == total:
-        remaining = Text("ended")
-    else:
-        remaining = pace(total - elapsed, available - earned)
+            line = "on pace"
+        blocks.append(Text(line, style="bold"))
+    # with the schedule over, no time is left to spread across points
+    remaining = (
+        Text("-") if elapsed == total else pace(total - elapsed, available - earned)
+    )
     rates = Table.grid(padding=(0, 2))
     rates.add_column(style="dim", no_wrap=True)
     rates.add_column(no_wrap=True)
     rates.add_row("time / pt", pace(total, available))
     rates.add_row("left / pt", remaining)
-    return [meter("time", value, time_ratio, "cyan", width), status, rates]
+    blocks.append(rates)
+    return blocks
 
 
 def plan(day: Day, tasks: list[Task]) -> Group:
@@ -321,8 +332,9 @@ def plan(day: Day, tasks: list[Task]) -> Group:
         if interval.start >= DAY_MINUTES:
             text.append(" next day", style="dim")
         grid.add_row("schedule" if index == 0 else "", text)
-    if not day.intervals:
-        grid.add_row("schedule", Text("not set (@)", style="dim"))
+    # styled like the footer's keys
+    hint = Text.assemble(("@", "bold blue"), " ", "edit" if day.intervals else "set")
+    grid.add_row("" if day.intervals else "schedule", hint)
     durations = [task.minutes for task in tasks if task.minutes is not None]
     blocks: list[RenderableType] = [grid]
     if durations:
@@ -382,7 +394,7 @@ class Change(NamedTuple):
 
 def progress_change(before: Task, after: Task) -> str:
     if after.available is None:
-        return f"marked {after.title} {'done' if after.checked else 'not done'}"
+        raise RuntimeError("unscored tasks have no progress to describe")
     available = number(after.available)
     return (
         f"changed {after.title} from {number(before.earned)}/{available} "
@@ -401,7 +413,7 @@ HELP = (
             ("^d ^u", "half a page down or up"),
             ("g", "first row"),
             ("G", "last row"),
-            ("⏎", "set points, or toggle an unscored task"),
+            ("⏎", "set earned points"),
             ("space", "toggle done"),
             ("+ -", "earned points up or down by one"),
             ("o", "add tasks below; on a section's rule, at its top"),
@@ -412,7 +424,7 @@ HELP = (
             ("p P", "put the last deleted row below or above"),
             ("J K", "move down or up, across sections"),
             ("f", "hide or show done tasks"),
-            ("s", "sort tasks across sections; or click a column name"),
+            ("s", "sort across sections; or click a column name"),
             ("u", "undo, kept per day until you quit"),
             ("^r", "redo; any new change clears it"),
         ),
@@ -454,8 +466,22 @@ class VimList(OptionList):
             return
         # every row is one line, so a page of lines is a page of rows
         step = max(self.scrollable_content_region.height // 2, 1)
-        target = self.highlighted + direction * step
-        self.highlighted = min(max(target, 0), self.option_count - 1)
+        self.highlighted = self.selectable_near(
+            self.highlighted + direction * step, direction
+        )
+
+    def selectable_near(self, index: int, direction: int) -> int:
+        """The row at index, clamped to the list, if the cursor may rest there;
+        else the nearest one in direction, else the nearest the other way."""
+        options = self.options
+        start = min(max(index, 0), len(options) - 1)
+        for step in (direction, -direction):
+            probe = start
+            while 0 <= probe < len(options):
+                if not options[probe].disabled:
+                    return probe
+                probe += step
+        raise RuntimeError("the task list has no selectable row")
 
 
 class VimScroll(VerticalScroll):
@@ -640,7 +666,7 @@ class HelpScreen(ModalScreen):
         for index, (group, rows) in enumerate(HELP):
             if index:
                 text.append("\n\n")
-            text.append(group, style="bold magenta")
+            text.append(group, style="bold")
             for keys, description in rows:
                 text.append(f"\n{keys:<{width}}", style="bold blue")
                 text.append(description)
@@ -826,13 +852,18 @@ class TodoApp(App):
                 options.extend(
                     Option(task_row(t), id=t.id) for t in self.shown(section.tasks)
                 )
+                subtotal = subtotal_row(section)
+                if subtotal is not None:
+                    # disabled, so the cursor passes over it
+                    options.append(Option(subtotal, disabled=True))
         widget.clear_options().add_options(options)
         ids = [option.id for option in options]
-        if selection in ids:
+        if selection is not None and selection in ids:
             widget.highlighted = ids.index(selection)
         else:
-            # the selected row is gone, so keep the cursor where it was
-            widget.highlighted = min(old_index or 0, len(ids) - 1)
+            # the selected row is gone, so keep the cursor where it was, or
+            # move up within its section rather than onto the next one
+            widget.highlighted = widget.selectable_near(old_index or 0, -1)
         empty = self.query_one("#empty", Static)
         if any(self.day.tasks()):
             empty.update("all done · f shows them")
@@ -1053,18 +1084,22 @@ class TodoApp(App):
         )
 
     def action_complete(self) -> None:
-        _, task = self.selected()
-        if task is not None:
-            self.save_progress(task, task.toggle())
+        self.change_progress(Task.toggle)
 
     def action_step(self, delta: int) -> None:
-        _, task = self.selected()
-        if task is not None:
-            self.save_progress(task, task.step(delta))
+        self.change_progress(lambda task: task.step(delta))
 
-    def save_progress(self, before: Task, after: Task) -> None:
+    def change_progress(self, change: Callable[[Task], Task]) -> None:
+        _, task = self.selected()
+        if task is None:
+            return
+        try:
+            after = change(task)
+        except ValueError as error:
+            self.notify(str(error), timeout=4)
+            return
         self.save_or_notify(
-            self.day.replace_task(after), progress_change(before, after), after.id
+            self.day.replace_task(after), progress_change(task, after), after.id
         )
 
     def action_delete(self) -> None:
@@ -1170,7 +1205,8 @@ class TodoApp(App):
     @on(events.Click, "#columns")
     def sort_by_column(self, event: events.Click) -> None:
         offset = event.get_content_offset(self.query_one("#columns"))
-        column = column_at(offset.x) if offset else None
+        # only the names: a rule may sit under them
+        column = column_at(offset.x) if offset and offset.y == 0 else None
         if column is not None:
             self.set_sort(next_sort(self.sort, column))
 

@@ -77,7 +77,7 @@ def test_copy_day_preserves_the_plan_and_resets_progress_with_new_identities():
                 (
                     Task("Practice", points("2.5"), points("0.75"), 20),
                     Task("Finished", points("1"), points("1")),
-                    Task("Remember", None, checked=True),
+                    Task("Remember", None),
                 ),
             ),
             Section("Empty"),
@@ -91,17 +91,16 @@ def test_copy_day_preserves_the_plan_and_resets_progress_with_new_identities():
     assert [section.title for section in copied.sections] == ["Tasks", "Empty"]
     assert not copied.sections[1].tasks
     for (_, original), (_, task) in zip(source.tasks(), copied.tasks(), strict=True):
-        assert task == replace(original, id=task.id, earned=Fraction(0), checked=False)
+        assert task == replace(original, id=task.id, earned=Fraction(0))
     original_ids = {s.id for s in source.sections} | {t.id for _, t in source.tasks()}
     copied_ids = {s.id for s in copied.sections} | {t.id for _, t in copied.tasks()}
     assert original_ids.isdisjoint(copied_ids)
     assert next(source.tasks())[1].earned == points("0.75")
-    assert source.sections[0].tasks[2].checked
 
 
 def test_rename_section_preserves_other_day_data_and_allows_duplicate_titles():
     first = Section("One", (Task("Practice", points("2"), points("1")),))
-    second = Section("Two", (Task("Note", None, checked=True),))
+    second = Section("Two", (Task("Note", None),))
     day = replace(empty_day(DAY), sections=(first, second))
 
     renamed = day.rename_section(first.id, " Two ")
@@ -123,7 +122,7 @@ def test_points_and_estimates_are_independent():
     task = Task("Practice", points("4"), points("0.75"), minutes=40)
     edited = replace(task, minutes=10)
     assert edited.earned == task.earned
-    assert score((edited, Task("Note", None, checked=True))) == (Fraction(3, 4), 4)
+    assert score((edited, Task("Note", None))) == (Fraction(3, 4), 4)
     assert per_point(task.minutes * 60, task.available) == 600
 
 
@@ -223,10 +222,7 @@ def test_report_matches_the_original_calculations():
     elapsed, total = 12600, 37800
     assert percentage(ratio(earned, available)) == "42.85"
     assert percentage(ratio(elapsed, total)) == "33.33"
-    assert (
-        percentage(ratio(earned, available) - ratio(elapsed, total), signed=True)
-        == "+9.52"
-    )
+    assert percentage(ratio(earned, available) - ratio(elapsed, total)) == "9.52"
     assert per_point(total, available) == 15 * 60
     assert per_point(total - elapsed, available - earned) == 17 * 60 + 30
     assert percentage(ratio(0, 0)) == "n/a"
@@ -249,10 +245,12 @@ def test_edit_move_remove_and_complete_preserve_task_identity():
     assert first.earned == 1
 
 
-def test_unscored_completion_does_not_award_points():
-    task = Task("Remember", None).toggle()
-    assert task.complete
-    assert score((task,)) == (0, 0)
+def test_unscored_tasks_have_no_done_state():
+    task = Task("Remember", None)
+    assert not task.complete
+    for change in (task.toggle, lambda: task.step(1)):
+        with pytest.raises(ValueError, match=r"^Unscored tasks have no done state\.$"):
+            change()
 
 
 def test_step_changes_earned_points_by_one_within_bounds():
@@ -261,8 +259,6 @@ def test_step_changes_earned_points_by_one_within_bounds():
     assert task.step(1).step(1).earned == points("2.5")
     assert task.step(-1).earned == 1
     assert Task("Read", points("3")).step(-1).earned == 0
-    assert Task("Remember", None).step(1).checked
-    assert not Task("Remember", None, checked=True).step(-1).checked
 
 
 def test_tasks_move_across_section_boundaries():
@@ -298,12 +294,10 @@ def test_editing_a_task_keeps_completion_and_caps_partial_progress():
     assert partial.edit("Read", points("5"), None).earned == 3
     done = Task("Read", points("2"), points("2"))
     assert done.edit("Read", points("5"), 30).complete
-    checked = Task("Remember", None, checked=True)
-    assert checked.edit("Remember", points("3"), None).earned == 3
+    assert Task("Remember", None).edit("Remember", points("3"), None).earned == 0
     assert partial.edit("Read", None, None) == replace(
         partial, available=None, earned=Fraction(0)
     )
-    assert done.edit("Read", None, None).checked
 
 
 def test_titles_are_trimmed_by_the_model():

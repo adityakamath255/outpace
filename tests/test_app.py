@@ -18,7 +18,6 @@ from todo.app import (
     arrange,
     duration,
     main,
-    schedule_status,
 )
 from todo.db import Store
 from todo.model import Interval, Section, Task, empty_day, parse_schedule, points
@@ -48,11 +47,16 @@ def footer_action(app, action):
     return next(key for key in app.query_one(Footer).children if key.action == action)
 
 
-def test_section_share_is_not_truncated():
+def test_section_share_is_not_truncated_and_is_hidden_at_all_points():
     section = Section("Tasks", (Task("Practice", points("5")),))
-    output = StringIO()
-    Console(file=output, width=44).print(SectionRule(section, points("5")))
-    assert "100.00% of total" in output.getvalue()
+
+    def rule(total):
+        output = StringIO()
+        Console(file=output, width=44).print(SectionRule(section, total))
+        return output.getvalue()
+
+    assert "50.00% of total" in rule(points("10"))
+    assert "of total" not in rule(points("5"))
 
 
 def test_clock_callback_does_not_touch_widgets_after_shutdown(app):
@@ -151,15 +155,22 @@ def test_task_changes_save_and_undo(app):
     asyncio.run(exercise_tasks())
 
 
-def test_enter_completes_an_unscored_task_without_a_dialog(app):
-    async def complete_unscored_task():
+def test_unscored_tasks_cannot_be_marked_done(app, monkeypatch):
+    messages = []
+    monkeypatch.setattr(
+        app, "notify", lambda message, **kwargs: messages.append(message)
+    )
+
+    async def try_to_complete():
         async with app.run_test() as pilot:
             await add_task(pilot, "Remember")
-            await pilot.press("enter")
-            assert app.selected()[1].checked
+            before = app.day
+            await pilot.press("enter", "space", "plus")
+            assert app.day == before
             assert not isinstance(app.screen, ModalScreen)
+            assert messages == ["Unscored tasks have no done state."] * 3
 
-    asyncio.run(complete_unscored_task())
+    asyncio.run(try_to_complete())
 
 
 @pytest.mark.parametrize("existing", [False, True])
@@ -168,7 +179,7 @@ def test_reuse_copies_a_saved_day_and_undo_restores_the_destination(app, existin
     destination = empty_day(date(2026, 11, 2))
     if existing:
         destination = destination.insert_task(
-            Task("Keep this plan", None, checked=True), destination.sections[0].id, 0
+            Task("Keep this plan", None), destination.sections[0].id, 0
         )
         app.store.save(destination)
 
@@ -326,9 +337,7 @@ def test_help_lists_every_key_binding(app):
     asyncio.run(open_and_close())
 
 
-def test_ended_schedule_is_explained_instead_of_showing_zero_remaining(
-    app, monkeypatch
-):
+def test_an_ended_schedule_has_no_time_left_per_point(app, monkeypatch):
     class Clock:
         @staticmethod
         def now():
@@ -338,32 +347,9 @@ def test_ended_schedule_is_explained_instead_of_showing_zero_remaining(
 
     async def check_ended_schedule():
         async with app.run_test():
-            stats = stats_text(app)
-            assert "schedule ended" in stats
-            assert "left / pt  ended" in stats
+            assert "left / pt  -" in stats_text(app)
 
     asyncio.run(check_ended_schedule())
-
-
-@pytest.mark.parametrize(
-    ("now", "expected"),
-    [
-        (7 * HOUR, "Not started"),
-        (7 * HOUR + 1800, "In progress"),
-        (11 * HOUR, "Between intervals"),
-        (23 * HOUR, "Schedule ended"),
-    ],
-)
-def test_schedule_status_follows_the_intervals(now, expected):
-    intervals = tuple(reversed(SCHEDULE))
-    assert schedule_status(intervals, now) == expected
-
-
-def test_overnight_and_unscheduled_lists_have_distinct_statuses():
-    now = 24 * HOUR + 1800
-    overnight = parse_schedule("23:00-01:00")
-    assert schedule_status(overnight, now) == "In progress"
-    assert schedule_status((), now) == "No schedule"
 
 
 def test_day_switching_preserves_lists_and_creates_new_days(app):
@@ -515,7 +501,7 @@ def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.press("at", "ctrl+u", "enter")
             assert app.day.intervals == ()
-            assert "not set" in stats_text(app)
+            assert "schedule  @ set" in stats_text(app)
             assert app.store.load(app.day.date) == app.day
             await pilot.press("at", *"08:00-09:00", "enter")
             assert app.day.intervals == (Interval(8 * 60, 9 * 60),)
@@ -661,6 +647,25 @@ def test_braces_jump_between_sections_like_paragraphs(app):
     asyncio.run(jump())
 
 
+def test_the_cursor_never_rests_on_a_subtotal(app):
+    a, b = Task("a", points("1")), Task("b", points("2"))
+    first, second = Section("A", (a,)), Section("B", (b,))
+    app.store.save(replace(app.day, sections=(first, second)))
+    app = TodoApp(app.store, app.day.date)
+
+    async def move():
+        async with app.run_test() as pilot:
+            # the done task vanishes from under the cursor, above A's subtotal
+            await pilot.press("f", "space")
+            section, task = app.selected()
+            assert (section.id, task) == (first.id, None)
+            # five rows make a half page two: from B's rule, onto B's subtotal
+            await pilot.press("ctrl+d", "ctrl+d")
+            assert app.selected()[1] == b
+
+    asyncio.run(move())
+
+
 def test_ctrl_d_and_ctrl_u_move_half_a_page(app):
     tasks = tuple(Task(f"task {n}", None) for n in range(60))
     app.store.save(replace(app.day, sections=(Section("Many", tasks),)))
@@ -741,7 +746,7 @@ def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
     app = TodoApp(app.store, day.date)
 
     def shown():
-        return [option.id for option in app.query_one("#tasks").options]
+        return [o.id for o in app.query_one("#tasks").options if not o.disabled]
 
     async def sort():
         async with app.run_test(size=(110, 45)) as pilot:
@@ -800,7 +805,7 @@ def test_command_line_rejects_dates_the_date_prompt_rejects(
 
 
 def test_f_hides_done_tasks_in_both_views_until_pressed_again(app):
-    d1, p = Task("d1", None, checked=True), Task("p", points("3"), points("1"))
+    d1, p = Task("d1", points("1"), points("1")), Task("p", points("3"), points("1"))
     d2, q = Task("d2", points("2"), points("2")), Task("q", points("1"))
     a, b = Section("A", (d1, p)), Section("B", (d2, q))
     day = replace(app.day, sections=(a, b))
@@ -808,7 +813,7 @@ def test_f_hides_done_tasks_in_both_views_until_pressed_again(app):
     app = TodoApp(app.store, day.date)
 
     def shown():
-        return [option.id for option in app.query_one("#tasks").options]
+        return [o.id for o in app.query_one("#tasks").options if not o.disabled]
 
     async def filter_done():
         async with app.run_test(size=(110, 45)) as pilot:
@@ -826,7 +831,8 @@ def test_f_hides_done_tasks_in_both_views_until_pressed_again(app):
             # finishing tasks hides them; with nothing left, say so
             await pilot.press("g", "j", "plus", "plus")
             assert shown() == [a.id, b.id, q.id]
-            app.query_one("#tasks").highlighted = 2
+            widget = app.query_one("#tasks")
+            widget.highlighted = widget.get_option_index(q.id)
             await pilot.press("space")
             assert shown() == [a.id, b.id]
             assert app.query_one("#empty").display

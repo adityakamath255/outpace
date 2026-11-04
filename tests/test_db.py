@@ -4,7 +4,7 @@ from datetime import date
 
 import pytest
 
-from todo.db import Store
+from todo.db import Store, decode
 from todo.model import Day, Section, Task, empty_day, points
 
 DAY = date(2026, 11, 1)
@@ -38,6 +38,16 @@ def test_days_survive_reopening(tmp_path):
     store.save(day)
     store.close()
     assert Store(path).load(DAY) == day
+
+
+def test_days_stored_with_unscored_done_states_still_load():
+    # stored before unscored tasks lost their done state
+    stored = (
+        '{"intervals": [], "sections": [{"id": "s", "title": "", "tasks": [{"id": '
+        '"t", "title": "Sleep", "available": null, "earned": "0", "minutes": null, '
+        '"checked": true}]}]}'
+    )
+    assert decode(DAY, stored).sections[0].tasks == (Task("Sleep", None, id="t"),)
 
 
 def test_blank_days_are_not_stored(tmp_path):

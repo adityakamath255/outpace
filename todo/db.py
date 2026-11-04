@@ -26,7 +26,6 @@ def encode(day: Day) -> str:
                             else str(task.available),
                             "earned": str(task.earned),
                             "minutes": task.minutes,
-                            "checked": task.checked,
                         }
                         for task in section.tasks
                     ],
@@ -54,8 +53,9 @@ def decode(list_date: date, text: str) -> Day:
                         else Fraction(task["available"]),
                         Fraction(task["earned"]),
                         task["minutes"],
-                        task["checked"],
-                        task["id"],
+                        # days stored earlier also carry "checked", the done
+                        # state unscored tasks no longer have; it is dropped
+                        id=task["id"],
                     )
                     for task in section["tasks"]
                 ),

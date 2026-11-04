@@ -19,7 +19,7 @@ Screen {
 }
 
 #columns {
-    height: 1;
+    height: auto;
     /* option padding plus the scrollbar gutter, so headers sit over their values */
     padding: 0 2 0 1;
 }
@@ -53,6 +53,11 @@ VimList > .option-list--option-highlighted {
 
 VimList:focus > .option-list--option-highlighted {
     text-style: bold;
+}
+
+/* subtotal rows: shown at full strength, only the cursor skips them */
+VimList > .option-list--option-disabled {
+    color: ansi_default;
 }
 
 VimList > .option-list--option-hover {
@@ -107,7 +112,6 @@ ModalScreen {
 
 .dialog-title {
     text-style: bold;
-    color: ansi_magenta;
     margin-bottom: 1;
 }
 
