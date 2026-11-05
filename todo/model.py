@@ -351,16 +351,26 @@ def score(tasks: Iterable[Task]) -> tuple[Fraction, Fraction]:
     return earned, available
 
 
+def work(tasks: Iterable[Task]) -> tuple[Fraction, Fraction]:
+    """Seconds of task durations done and needed. A task counts as done by the
+    share of its points earned, so an unscored task is never done."""
+    done = Fraction(0)
+    needed = Fraction(0)
+    for task in tasks:
+        if task.minutes is not None:
+            seconds = task.minutes * 60
+            needed += seconds
+            if task.available is not None:
+                done += seconds * task.earned / task.available
+    return done, needed
+
+
 def time_progress(intervals: tuple[Interval, ...], now: int) -> tuple[int, int]:
     """Elapsed and total scheduled seconds, now being seconds_into the day."""
     return (
         sum(min(max(now - i.start * 60, 0), i.seconds) for i in intervals),
         sum(i.seconds for i in intervals),
     )
-
-
-def ratio(numerator: int | Fraction, denominator: int | Fraction) -> Fraction | None:
-    return Fraction(numerator, denominator) if denominator else None
 
 
 def number(value: Fraction) -> str:
@@ -383,6 +393,6 @@ def percentage(value: Fraction) -> str:
     return f"{sign}{whole}.{decimal:02d}"
 
 
-def per_point(seconds: int, available: Fraction) -> int | None:
+def per_point(seconds: int | Fraction, available: Fraction) -> int | None:
     """Whole seconds per point, or None without points."""
     return int(Fraction(seconds) / available) if available else None

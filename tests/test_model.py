@@ -17,7 +17,6 @@ from todo.model import (
     per_point,
     percentage,
     points,
-    ratio,
     score,
     time_progress,
 )
@@ -220,9 +219,8 @@ def test_day_accepts_touching_intervals_and_rejects_partial_overlap():
 def test_report_matches_the_original_calculations():
     earned, available = Fraction(18), Fraction(42)
     elapsed, total = 12600, 37800
-    assert percentage(ratio(earned, available)) == "42.85"
-    assert percentage(ratio(elapsed, total)) == "33.33"
-    assert percentage(ratio(earned, available) - ratio(elapsed, total)) == "9.52"
+    assert percentage(earned / available) == "42.85"
+    assert percentage(Fraction(elapsed, total)) == "33.33"
     assert per_point(total, available) == 15 * 60
     assert per_point(total - elapsed, available - earned) == 17 * 60 + 30
     assert per_point(0, Fraction(0)) is None

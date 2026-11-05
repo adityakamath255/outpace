@@ -13,15 +13,26 @@ from textual.widgets import Footer, Input, Static
 
 from todo.app import (
     COLUMNS,
+    PANE_WIDTH,
     SectionRule,
     Sort,
     TodoApp,
     arrange,
     duration,
     main,
+    stats,
+    subtotal_row,
 )
 from todo.db import Store
-from todo.model import Interval, Section, Task, empty_day, parse_schedule, points
+from todo.model import (
+    Day,
+    Interval,
+    Section,
+    Task,
+    empty_day,
+    parse_schedule,
+    points,
+)
 
 SCHEDULE = parse_schedule("07:30-11:00, 16:00-23:00")
 
@@ -38,9 +49,12 @@ async def add_task(pilot, title):
     await pilot.press("enter", "escape")
 
 
-def line_of(text, label):
-    """The stats row a grid label starts; labels are padded by two spaces."""
-    return next(row for row in text.splitlines() if row.startswith(f"{label}  "))
+def pane_rows(day, now):
+    """The stats pane at the width it has at 80 columns, one row per line with
+    its cells separated by single spaces."""
+    output = StringIO()
+    Console(file=output, width=PANE_WIDTH).print(stats(day, now, None))
+    return [" ".join(line.split()) for line in output.getvalue().splitlines()]
 
 
 def footer_action(app, action):
@@ -335,19 +349,77 @@ def test_help_lists_every_key_binding(app):
     asyncio.run(open_and_close())
 
 
-def test_an_ended_schedule_has_no_time_left_per_point(app, monkeypatch):
-    class Clock:
-        @staticmethod
-        def now():
-            return datetime(2026, 11, 2, 8)
+def test_stats_fit_the_pane_at_80_columns():
+    day = Day(
+        date(2026, 11, 1),
+        parse_schedule("07:30-23:00"),
+        (Section("", (Task("Practice", points("5"), points("2"), 30),)),),
+    )
+    # over ten hours elapsed, with seconds, makes the widest time row
+    rows = pane_rows(day, datetime(2026, 11, 1, 18, 22, 26))
+    assert "time 10h52m26s / 15h30m" in rows
+    # fewer points than hours, with seconds, makes the widest per-point row
+    big = Task("Big", points("4"), points("1"), 300)
+    other = Task("Other", points("3"), minutes=200)
+    sparse = Day(
+        day.date,
+        parse_schedule("08:00-15:30, 19:00-23:00"),
+        (Section("", (big, other)),),
+    )
+    rows = pane_rows(sparse, datetime(2026, 11, 1, 9, 13, 7))
+    assert "time/pt 1h42m48s 1h38m34s" in rows
 
-    monkeypatch.setattr("todo.app.datetime", Clock)
 
-    async def check_ended_schedule():
-        async with app.run_test():
-            assert "left / pt  -" in stats_text(app)
+def test_the_stats_pane_has_its_width_at_80_columns(app):
+    async def measure():
+        async with app.run_test(size=(80, 24)):
+            assert app.query_one("#stats").content_region.width == PANE_WIDTH
 
-    asyncio.run(check_ended_schedule())
+    asyncio.run(measure())
+
+
+def test_stats_compare_time_with_work_for_the_day_and_from_now():
+    cheap = Task("Cheap", points("5"), points("5"), 60)
+    dear = Task("Dear", points("5"), minutes=540)
+    day = Day(
+        date(2026, 11, 1), parse_schedule("08:00-18:00"), (Section("", (cheap, dear)),)
+    )
+    rows = pane_rows(day, datetime(2026, 11, 1, 10))
+    # the cheap points are done, so pace looks ahead while the rest won't fit
+    for row in (
+        "time 2h / 10h",
+        "pts 5 / 10",
+        "work 1h / 10h",
+        "time/pt 1h36m 1h",
+        "work/pt 1h48m 1h",
+        "earned 5h",
+        "pace ahead 3h",
+        "all day spare 0s",
+        "from now over 1h",
+    ):
+        assert row in rows
+
+
+def test_verdicts_name_the_direction_of_the_whole_seconds_they_show():
+    # eleven points make a point's share of the day a fraction of a second
+    task = Task("Long", points("11"), points("1"), 600)
+    day = Day(date(2026, 11, 1), parse_schedule("08:00-18:00"), (Section("", (task,)),))
+    # earned is 54m32.7s and work done the same; time is 54m32s
+    assert "pace on pace" in pane_rows(day, datetime(2026, 11, 1, 8, 54, 32))
+    # a third of a second over is no whole second over
+    assert "from now spare 0s" in pane_rows(day, datetime(2026, 11, 1, 8, 54, 33))
+
+
+def test_an_ended_schedule_has_no_time_left_per_point(app):
+    rows = pane_rows(app.day, datetime(2026, 11, 2, 8))
+    assert "time/pt - 2h6m" in rows
+
+
+def test_subtotal_shows_how_much_of_its_section_is_done():
+    section = Section("", (Task("A", points("4"), points("1")), Task("B", points("4"))))
+    output = StringIO()
+    Console(file=output, width=80).print(subtotal_row(section))
+    assert "subtotal  12.50%" in output.getvalue()
 
 
 def test_day_switching_preserves_lists_and_creates_new_days(app):
@@ -499,7 +571,7 @@ def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.press("at", "ctrl+u", "enter")
             assert app.day.intervals == ()
-            assert "schedule  @ set" in stats_text(app)
+            assert "schedule none" in pane_rows(app.day, datetime.now())
             assert app.store.load(app.day.date) == app.day
             await pilot.press("at", *"08:00-09:00", "enter")
             assert app.day.intervals == (Interval(8 * 60, 9 * 60),)
@@ -791,26 +863,6 @@ def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
             assert app.store.load(day.date) == day
 
     asyncio.run(sort())
-
-
-def test_plan_shows_spare_or_over_scheduled_time(app):
-    section = app.day.sections[0]
-
-    def line(label):
-        return line_of(stats_text(app), label)
-
-    async def plan():
-        async with app.run_test():
-            assert "07:30 - 11:00" in line("schedule")
-            assert "30m" in line("needed")
-            assert "10h" in line("spare")
-            app.save_change(
-                app.day.insert_task(Task("Long", None, minutes=660), section.id, 0),
-                "added Long",
-            )
-            assert "1h" in line("over")
-
-    asyncio.run(plan())
 
 
 @pytest.mark.parametrize("value", ["20261102", "2026-W45-1"])

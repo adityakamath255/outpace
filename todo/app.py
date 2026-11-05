@@ -42,17 +42,21 @@ from .model import (
     per_point,
     percentage,
     points,
-    ratio,
     score,
     seconds_into,
     time_progress,
+    work,
 )
 
 # failures shown to the user while the draft or the list stays as it was
 RECOVERABLE = (ValueError, sqlite3.Error, OSError)
 
-BAR_WIDTH = 32
 MAX_MESSAGES = 5
+# the stats pane's content width: all the pane has at 80 columns, and what
+# every block lines up to at any size
+PANE_WIDTH = 25
+# the label column of the per-point table; bars start after it
+LABEL_WIDTH = 7
 
 
 def duration(seconds: int) -> Text:
@@ -66,9 +70,14 @@ def duration(seconds: int) -> Text:
     return text if text.plain else Text.assemble("0", ("s", "dim"))
 
 
-def pace(seconds: int, available: Fraction) -> Text:
+def rate(seconds: int | Fraction, available: Fraction) -> Text:
     value = per_point(seconds, available)
     return Text("-") if value is None else duration(value)
+
+
+def timed(tasks: tuple[Task, ...]) -> tuple[Task, ...]:
+    """The tasks work per point counts: those with both a duration and points."""
+    return tuple(t for t in tasks if t.minutes and t.available is not None)
 
 
 def completion(task: Task) -> Fraction | None:
@@ -77,7 +86,7 @@ def completion(task: Task) -> Fraction | None:
     return task.earned / task.available
 
 
-def time_per_point(task: Task) -> Fraction | None:
+def work_per_point(task: Task) -> Fraction | None:
     if task.minutes is None or task.available is None:
         return None
     return task.minutes / task.available
@@ -114,11 +123,11 @@ COLUMNS = (
         ("shortest duration first", "longest duration first"),
     ),
     Column(
-        "t/pt",
+        "w/pt",
         8,
-        time_per_point,
+        work_per_point,
         False,
-        ("least time per point first", "most time per point first"),
+        ("least work per point first", "most work per point first"),
     ),
 )
 
@@ -151,7 +160,7 @@ def task_row(task: Task) -> Table:
         Text(number(task.earned) if scored else "", style=color),
         number(task.available) if task.available is not None else "",
         duration(task.minutes * 60) if task.minutes else "",
-        pace(task.minutes * 60, task.available)
+        rate(task.minutes * 60, task.available)
         if task.minutes and task.available is not None
         else "",
     )
@@ -298,17 +307,14 @@ class SectionRule:
 def subtotal_row(section: Section) -> Table | None:
     """A section's totals in the task columns, or None with nothing to total.
 
-    Time per point counts only tasks with both a duration and points."""
+    Work per point counts only tasks with both a duration and points."""
     earned, available = score(section.tasks)
     minutes = sum(task.minutes or 0 for task in section.tasks)
     if not available and not minutes:
         return None
-    paced = [
-        (task.minutes, task.available)
-        for task in section.tasks
-        if task.minutes and task.available is not None
-    ]
-    paced_points = sum((points for _, points in paced), Fraction(0))
+    timed_tasks = timed(section.tasks)
+    _, timed_points = score(timed_tasks)
+    _, timed_seconds = work(timed_tasks)
     style = "bold"
     cells = (
         "",
@@ -317,105 +323,154 @@ def subtotal_row(section: Section) -> Table | None:
         # unit letters stay undimmed, so the totals read as one block
         Text(duration(minutes * 60).plain if minutes else "", style=style),
         Text(
-            pace(sum(m for m, _ in paced) * 60, paced_points).plain if paced else "",
-            style=style,
+            rate(timed_seconds, timed_points).plain if timed_tasks else "", style=style
         ),
     )
-    return row(cells, Text("subtotal", style=style))
+    title = Text("subtotal", style=style)
+    if available:
+        title.append(f"  {percentage(earned / available)}%")
+    return row(cells, title)
 
 
-def meter(
-    label: str, value: Text, progress: Fraction | None, color: str, width: int
-) -> Text:
-    text = Text()
-    text.append(f"{label:<8}", style="dim")
-    text.append_text(value)
-    if progress is None:
-        return text
+def labelled(*rows: tuple[str, Text]) -> Table:
+    """Labels at the left edge and values at the pane's right edge."""
+    table = Table.grid(padding=(0, 1))
+    table.width = PANE_WIDTH
+    table.add_column(style="dim", no_wrap=True)
+    table.add_column(justify="right", no_wrap=True, ratio=1)
+    for cells in rows:
+        table.add_row(*cells)
+    return table
+
+
+def total(label: str, done: Text, whole: Text, progress: Fraction, color: str) -> Group:
+    """done / whole, over a bar that ends in its percentage."""
     share = f" {percentage(progress)}%"
-    bar = max(width - len(share), 1)
-    filled = min(int(progress * bar), bar)
-    text.append("\n" + "━" * filled, style=color)
-    text.append("─" * (bar - filled), style="dim")
-    text.append(share, style=color)
-    return text
-
-
-def schedule_blocks(
-    day: Day, now: datetime, earned: Fraction, available: Fraction, width: int
-) -> list[RenderableType]:
-    now_seconds = seconds_into(day.date, now)
-    elapsed, total = time_progress(day.intervals, now_seconds)
-    progress, time_ratio = ratio(earned, available), ratio(elapsed, total)
-    value = duration(elapsed) + Text(" / ") + duration(total)
-    blocks: list[RenderableType] = [meter("time", value, time_ratio, "cyan", width)]
-    if progress is not None and time_ratio is not None:
-        difference = progress - time_ratio
-        # the word gives the direction, so the number goes unsigned
-        if difference:
-            word = "ahead" if difference > 0 else "behind"
-            line = f"{percentage(abs(difference))} pp {word}"
-        else:
-            line = "on pace"
-        blocks.append(Text(line, style="bold"))
-    # with the schedule over, no time is left to spread across points
-    remaining = (
-        Text("-") if elapsed == total else pace(total - elapsed, available - earned)
+    length = PANE_WIDTH - LABEL_WIDTH - 1 - len(share)
+    filled = min(int(progress * length), length)
+    bar = Text.assemble(
+        " " * (LABEL_WIDTH + 1),
+        ("━" * filled, color),
+        ("─" * (length - filled), "dim"),
+        (share, color),
     )
-    rates = Table.grid(padding=(0, 2))
-    rates.add_column(style="dim", no_wrap=True)
-    rates.add_column(no_wrap=True)
-    rates.add_row("time / pt", pace(total, available))
-    rates.add_row("left / pt", remaining)
-    blocks.append(rates)
-    return blocks
+    return Group(labelled((label, done + Text(" / ") + whole)), bar)
 
 
-def plan(day: Day, tasks: list[Task]) -> Group:
-    """The schedule against the task durations: how much time the plan leaves."""
-    grid = Table.grid(padding=(0, 2))
-    grid.add_column(style="dim", no_wrap=True)
-    grid.add_column()
+def verdict(seconds: int | Fraction, good: str, bad: str) -> Text:
+    """The word gives the direction, so the duration goes unsigned and colour
+    only backs the word up. Both come from the whole seconds, so under a second
+    either way reads as 0s on the good side."""
+    whole = int(seconds)
+    word, color = (good, "blue") if whole >= 0 else (bad, "yellow")
+    return Text.assemble((word, color), " ", duration(abs(whole)))
+
+
+def schedule_rows(day: Day) -> Table:
+    if not day.intervals:
+        return labelled(("schedule", Text("none", style="dim")))
+    rows: list[tuple[str, Text]] = []
     for index, interval in enumerate(day.intervals):
         text = Text(interval_text(interval))
         if interval.start >= DAY_MINUTES:
             text.append(" next day", style="dim")
-        grid.add_row("schedule" if index == 0 else "", text)
-    # styled like the footer's keys
-    hint = Text.assemble(("@", "bold blue"), " ", "edit" if day.intervals else "set")
-    grid.add_row("" if day.intervals else "schedule", hint)
-    durations = [task.minutes for task in tasks if task.minutes is not None]
-    blocks: list[RenderableType] = [grid]
-    if durations:
-        needed = sum(durations) * 60
-        grid.add_row("needed", duration(needed))
-        scheduled = sum(interval.seconds for interval in day.intervals)
-        # the word carries the meaning; colour only backs it up
-        if scheduled and needed <= scheduled:
-            grid.add_row(Text("spare", style="blue"), duration(scheduled - needed))
-        elif scheduled:
-            over = duration(needed - scheduled)
-            over.stylize("yellow")
-            grid.add_row(Text("over", style="bold yellow"), over)
-        missing = sum(
-            task.minutes is None and task.available is not None for task in tasks
-        )
-        if missing:
-            blocks.append(Text(f"{missing} scored without a duration", style="dim"))
-    return Group(*blocks)
+        rows.append(("schedule" if index == 0 else "", text))
+    return labelled(*rows)
 
 
-def stats(day: Day, now: datetime, width: int, full_title: str | None) -> Group:
-    width = min(width, BAR_WIDTH)
-    tasks = list(day.tasks())
+def stats(day: Day, now: datetime, full_title: str | None) -> Group:
+    """The day's totals, time and work per point, and verdicts on the time left.
+
+    Time comes from the schedule and work from the task durations; unscored
+    tasks take time, so their durations count as work never done."""
+    tasks = tuple(day.tasks())
     earned, available = score(tasks)
-    value = Text(f"{number(earned)} / {number(available)}", style="bold")
-    blocks: list[RenderableType] = [
-        meter("points", value, ratio(earned, available), "green", width)
-    ]
-    if day.intervals:
-        blocks += schedule_blocks(day, now, earned, available, width)
-    blocks.append(plan(day, tasks))
+    elapsed, scheduled = time_progress(day.intervals, seconds_into(day.date, now))
+    worked, needed = work(tasks)
+    timed_tasks = timed(tasks)
+    timed_earned, timed_available = score(timed_tasks)
+    timed_worked, timed_needed = work(timed_tasks)
+
+    totals: list[RenderableType] = []
+    if scheduled:
+        totals.append(
+            total(
+                "time",
+                duration(elapsed),
+                duration(scheduled),
+                Fraction(elapsed, scheduled),
+                "cyan",
+            )
+        )
+    if available:
+        totals.append(
+            total(
+                "pts",
+                Text(number(earned)),
+                Text(number(available)),
+                earned / available,
+                "green",
+            )
+        )
+    if needed:
+        totals.append(
+            total(
+                "work",
+                duration(int(worked)),
+                duration(int(needed)),
+                worked / needed,
+                "green",
+            )
+        )
+
+    blocks: list[RenderableType] = [schedule_rows(day), *totals]
+    if available and (scheduled or timed_available):
+        rates = Table.grid(padding=(0, 1))
+        rates.add_column(min_width=LABEL_WIDTH, style="dim", no_wrap=True)
+        # room for 9h59m59s per point in each, which fills the pane
+        rates.add_column(min_width=8, justify="right", no_wrap=True)
+        rates.add_column(min_width=8, justify="right", no_wrap=True)
+        rates.add_row("", Text("left", style="dim"), Text("all", style="dim"))
+        if scheduled:
+            # with the schedule over, no time is left to spread across points
+            left = (
+                Text("-")
+                if elapsed == scheduled
+                else rate(scheduled - elapsed, available - earned)
+            )
+            rates.add_row("time/pt", left, rate(scheduled, available))
+        if timed_available:
+            rates.add_row(
+                "work/pt",
+                rate(timed_needed - timed_worked, timed_available - timed_earned),
+                rate(timed_needed, timed_available),
+            )
+        blocks.append(rates)
+
+    verdicts: list[tuple[str, Text]] = []
+    if scheduled and available:
+        # the schedule spread evenly over the points, as far as they're earned;
+        # whole seconds, so pace is the difference of the two durations shown
+        worth = int(scheduled * earned / available)
+        ahead = worth - elapsed
+        verdicts.append(("earned", duration(worth)))
+        verdicts.append(
+            ("pace", verdict(ahead, "ahead", "behind") if ahead else Text("on pace"))
+        )
+    if scheduled and needed:
+        verdicts.append(("all day", verdict(scheduled - needed, "spare", "over")))
+        verdicts.append(
+            (
+                "from now",
+                verdict(scheduled - elapsed - (needed - worked), "spare", "over"),
+            )
+        )
+    if verdicts:
+        blocks.append(labelled(*verdicts))
+
+    missing = sum(t.minutes is None and t.available is not None for t in tasks)
+    if needed and missing:
+        blocks.append(Text(f"{missing} scored without a duration", style="dim"))
     if full_title is not None:
         blocks.append(Text(full_title, style="bold"))
     spaced: list[RenderableType] = []
@@ -569,15 +624,14 @@ class TaskPane(Vertical):
                 options.extend(Option(task_row(t), id=t.id) for t in tasks)
                 subtotal = subtotal_row(section)
                 if subtotal is not None:
-                    # disabled, so the cursor passes over it
                     options.append(Option(subtotal, disabled=True))
         widget.set_options(options)
         ids = [option.id for option in options]
         if selection is not None and selection in ids:
             widget.highlighted = ids.index(selection)
         else:
-            # the selected row is gone, so keep the cursor where it was, or
-            # move up within its section rather than onto the next one
+            # upward, so the cursor stays in its section rather than reaching
+            # the next one
             widget.highlighted = widget.selectable_near(old_index or 0, -1)
         empty = self.query_one("#empty", Static)
         if any(view.day.tasks()):
@@ -608,7 +662,6 @@ class Form(ModalScreen):
         raise NotImplementedError
 
     def show(self, selector: str, message: str) -> None:
-        """Shows a message line, which takes no room while empty."""
         line = self.query_one(selector, Static)
         line.update(message)
         line.display = bool(message)
@@ -796,9 +849,9 @@ class TodoApp(App):
         Binding("P", "put(False)", "Put above", show=False),
         Binding("u", "undo", "Undo"),
         Binding("ctrl+r", "redo", "Redo", show=False),
+        Binding("@", "schedule", "Schedule"),
         Binding("question_mark", "help", "Keys"),
         Binding("c", "reuse", "Reuse", show=False),
-        Binding("@", "schedule", "Schedule", show=False),
         Binding("s", "sort", "Sort", show=False),
         Binding("f", "toggle_done", "Hide done", show=False),
         Binding("J", "move(1)", "Move down", show=False),
@@ -809,7 +862,8 @@ class TodoApp(App):
         Binding("[", "shift_day(-1)", "Previous day", show=False),
         Binding("]", "shift_day(1)", "Next day", show=False),
         Binding("t", "today", "Today", show=False),
-        Binding("q", "quit", "Quit"),
+        # hidden for room at 80 columns; ? lists it
+        Binding("q", "quit", "Quit", show=False),
     ]
 
     def __init__(self, store: Store, list_date: date):
@@ -931,9 +985,8 @@ class TodoApp(App):
             width = tasks.scrollable_content_region.width - 2 - FIXED_WIDTH
             if Text(task.title).cell_len > width:
                 full_title = task.title
-        pane = self.query_one("#stats", Static)
-        pane.update(
-            stats(self.day, datetime.now(), pane.content_region.width, full_title)
+        self.query_one("#stats", Static).update(
+            stats(self.day, datetime.now(), full_title)
         )
 
     @on(OptionList.OptionHighlighted, "#tasks")
@@ -980,7 +1033,6 @@ class TodoApp(App):
         *,
         select: str | None = None,
     ) -> bool:
-        """Whether the day changed: an unchanged day saves nothing."""
         try:
             return self.save_change(day, description, subject, select=select)
         except RECOVERABLE as error:
