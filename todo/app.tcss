@@ -198,3 +198,41 @@ Toast {
     width: 1fr;
     margin-right: 0;
 }
+
+#schedule-dialog {
+    width: 50;
+}
+
+#intervals {
+    height: auto;
+}
+
+.interval {
+    height: 1;
+}
+
+/* room for 23:59 and the cursor */
+.interval Input, .interval Input:focus {
+    width: 8;
+}
+
+.interval Label {
+    width: 3;
+    content-align: center middle;
+}
+
+.interval .note {
+    width: 1fr;
+    text-align: right;
+}
+
+#add-interval {
+    width: auto;
+    padding: 0 1;
+    text-style: dim;
+}
+
+#add-interval:focus {
+    background: ansi_black;
+    text-style: bold;
+}

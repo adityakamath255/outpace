@@ -10,7 +10,7 @@ from uuid import uuid4
 
 _DURATION_ERROR = "Use minutes, like 90, or hours and minutes, like 1h30m."
 _UNSCORED_ERROR = "Unscored tasks have no done state."
-_CLOCK_ERROR = "Use a 24-hour time in H:MM or HH:MM format."
+_CLOCK_ERROR = "Use a 24-hour time, like 07:30, 0730 or 7."
 DAY_MINUTES = 24 * 60
 
 
@@ -138,28 +138,28 @@ class Interval:
     def seconds(self) -> int:
         return (self.end - self.start) * 60
 
+    @property
+    def next_day(self) -> bool:
+        return self.start >= DAY_MINUTES
 
-def _clock(text: str) -> int:
-    match = re.fullmatch(r"(\d{1,2}):(\d{2})", text.strip())
-    if match is None or int(match[1]) > 23 or int(match[2]) > 59:
+
+def parse_clock(text: str) -> int:
+    """Minutes into the day from a 24-hour time, written like 07:30, 7:30,
+    0730, 730 or a bare hour like 7."""
+    match = re.fullmatch(r"(\d{1,2})(?::?(\d{2}))?", text.strip())
+    if match is None or int(match[1]) > 23 or int(match[2] or 0) > 59:
         raise ValueError(_CLOCK_ERROR)
-    return int(match[1]) * 60 + int(match[2])
+    return int(match[1]) * 60 + int(match[2] or 0)
 
 
-def parse_schedule(text: str) -> tuple[Interval, ...]:
-    """Reads intervals written in order, like 07:30 - 11:00, 16:00 - 23:00.
+def schedule(clocks: Iterable[tuple[int, int]]) -> tuple[Interval, ...]:
+    """Intervals from start and end clock times, in minutes, written in order.
 
     The first starts on the list's day. Each later one starts at the first time
     with its clock reading at or after the previous end, so writing past
-    midnight continues into the next day; blank means no schedule."""
+    midnight continues into the next day."""
     intervals: list[Interval] = []
-    for part in filter(None, (part.strip() for part in text.split(","))):
-        start_text, dash, end_text = part.partition("-")
-        if not dash:
-            raise ValueError("Write each interval as start - end, like 07:30 - 11:00.")
-        start, end = _clock(start_text), _clock(end_text)
-        if start == end:
-            raise ValueError("An interval cannot have identical start and end times.")
+    for start, end in clocks:
         previous_end = intervals[-1].end if intervals else 0
         while start < previous_end:
             start += DAY_MINUTES
@@ -170,10 +170,6 @@ def parse_schedule(text: str) -> tuple[Interval, ...]:
             "The schedule spans more than 24 hours; write its intervals in order."
         )
     return tuple(intervals)
-
-
-def format_schedule(intervals: tuple[Interval, ...]) -> str:
-    return ", ".join(interval_text(i) for i in intervals)
 
 
 def interval_text(interval: Interval) -> str:

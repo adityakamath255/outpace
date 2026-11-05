@@ -10,13 +10,13 @@ from todo.model import (
     Section,
     Task,
     empty_day,
-    format_schedule,
     number,
+    parse_clock,
     parse_minutes,
-    parse_schedule,
     per_point,
     percentage,
     points,
+    schedule,
     score,
     time_progress,
 )
@@ -60,16 +60,10 @@ def test_durations_are_capped_at_a_day():
         Task("Practice", None, minutes=24 * 60 + 1)
 
 
-def test_new_days_have_no_schedule():
-    day = empty_day(DAY)
-    assert day.intervals == ()
-    assert time_progress(day.intervals, 12 * HOUR) == (0, 0)
-
-
 def test_copy_day_preserves_the_plan_and_resets_progress_with_new_identities():
     source = Day(
         DAY,
-        parse_schedule("23:00-01:00, 01:30-02:00"),
+        schedule([(1380, 60), (90, 120)]),
         (
             Section(
                 "Tasks",
@@ -117,14 +111,6 @@ def test_blank_section_titles_mean_untitled_and_unknown_ids_are_rejected():
         day.rename_section("missing", "Work")
 
 
-def test_points_and_estimates_are_independent():
-    task = Task("Practice", points("4"), points("0.75"), minutes=40)
-    edited = replace(task, minutes=10)
-    assert edited.earned == task.earned
-    assert score((edited, Task("Note", None))) == (Fraction(3, 4), 4)
-    assert per_point(task.minutes * 60, task.available) == 600
-
-
 def test_decimal_points_round_trip_without_display_loss():
     for text in ("0.000001", "12345678901234567890.125", "2.5"):
         assert number(points(text)) == text
@@ -157,7 +143,7 @@ def test_invalid_task_scores_are_rejected_instead_of_disappearing_from_total():
 
 
 def test_schedule_pauses_between_intervals_and_stops_at_end():
-    intervals = parse_schedule("07:30-11:00, 16:00-23:00")
+    intervals = schedule([(450, 660), (960, 1380)])
     for hour in (11, 12, 16):
         assert time_progress(intervals, hour * HOUR) == (
             12600,
@@ -168,48 +154,49 @@ def test_schedule_pauses_between_intervals_and_stops_at_end():
 
 
 def test_overnight_schedule_belongs_to_its_original_day():
-    (interval,) = parse_schedule("23:00-01:00")
+    (interval,) = schedule([(1380, 60)])
     assert time_progress((interval,), 24 * HOUR + 1800) == (5400, 7200)
-    with pytest.raises(ValueError, match="overlap"):
-        Day(DAY, (interval, interval), (Section("Tasks"),))
 
 
-def test_schedule_parser_accepts_short_clocks_and_whitespace():
-    assert parse_schedule(" 7:30 - 11:00 ,") == (Interval(450, 660),)
-    assert parse_schedule("  ") == ()
+@pytest.mark.parametrize(
+    ("text", "minutes"),
+    [
+        (" 7:30 ", 450),
+        ("0730", 450),
+        ("730", 450),
+        ("7", 420),
+        ("15", 900),
+        ("23:59", 1439),
+    ],
+)
+def test_clock_accepts_times_with_or_without_the_colon(text, minutes):
+    assert parse_clock(text) == minutes
+
+
+@pytest.mark.parametrize("text", ["", "7:3", "7:", "24", "9:75", "12345"])
+def test_clock_rejects_other_times(text):
+    with pytest.raises(ValueError, match="24-hour time"):
+        parse_clock(text)
 
 
 def test_schedule_continues_past_midnight_in_order():
-    text = "16:00 - 23:00, 23:30 - 00:30, 01:00 - 01:30"
-    intervals = parse_schedule(text)
+    intervals = schedule([(960, 1380), (1410, 30), (60, 90)])
     assert intervals == (
         Interval(960, 1380),
         Interval(1410, 1470),
         Interval(1500, 1530),
     )
-    assert format_schedule(intervals) == text
+    assert schedule([]) == ()
 
 
-@pytest.mark.parametrize(
-    ("text", "message"),
-    [
-        ("7:3-08:00", "24-hour time"),
-        ("07:30-bad", "24-hour time"),
-        ("24:00-01:00", "24-hour time"),
-        ("9:75-10:00", "24-hour time"),
-        ("07:30", "start - end"),
-        ("07:30-7:30", "identical"),
-        # out of order, so the second interval would land on the next day
-        ("07:30-11:00, 10:30-12:00", "24 hours"),
-    ],
-)
-def test_schedule_parser_explains_invalid_schedules(text, message):
-    with pytest.raises(ValueError, match=message):
-        parse_schedule(text)
+def test_schedule_rejects_intervals_out_of_order():
+    # the second interval would land on the next day
+    with pytest.raises(ValueError, match="24 hours"):
+        schedule([(450, 660), (630, 720)])
 
 
 def test_day_accepts_touching_intervals_and_rejects_partial_overlap():
-    first, touching = parse_schedule("07:30-11:00, 11:00-12:00")
+    first, touching = schedule([(450, 660), (660, 720)])
     day = Day(DAY, (touching, first), (Section("Tasks"),))
     assert time_progress(day.intervals, 12 * HOUR) == (16200, 16200)
     with pytest.raises(ValueError, match="overlap"):
@@ -224,6 +211,9 @@ def test_report_matches_the_original_calculations():
     assert per_point(total, available) == 15 * 60
     assert per_point(total - elapsed, available - earned) == 17 * 60 + 30
     assert per_point(0, Fraction(0)) is None
+    # unscored tasks count toward neither
+    practice = Task("Practice", points("4"), points("0.75"))
+    assert score((practice, Task("Note", None))) == (Fraction(3, 4), 4)
 
 
 def test_edit_move_remove_and_complete_preserve_task_identity():

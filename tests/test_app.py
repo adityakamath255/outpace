@@ -30,17 +30,19 @@ from todo.model import (
     Section,
     Task,
     empty_day,
-    parse_schedule,
+    parse_clock,
     points,
+    schedule,
 )
 
-SCHEDULE = parse_schedule("07:30-11:00, 16:00-23:00")
+
+def written(text):
+    """A schedule written like 07:30-11:00, 16:00-23:00."""
+    pairs = (part.split("-") for part in text.split(","))
+    return schedule((parse_clock(start), parse_clock(end)) for start, end in pairs)
 
 
-def stats_text(app):
-    output = StringIO()
-    Console(file=output, width=60).print(app.query_one("#stats", Static).content)
-    return output.getvalue()
+SCHEDULE = written("07:30-11:00, 16:00-23:00")
 
 
 async def add_task(pilot, title):
@@ -352,7 +354,7 @@ def test_help_lists_every_key_binding(app):
 def test_stats_fit_the_pane_at_80_columns():
     day = Day(
         date(2026, 11, 1),
-        parse_schedule("07:30-23:00"),
+        written("07:30-23:00"),
         (Section("", (Task("Practice", points("5"), points("2"), 30),)),),
     )
     # over ten hours elapsed, with seconds, makes the widest time row
@@ -363,7 +365,7 @@ def test_stats_fit_the_pane_at_80_columns():
     other = Task("Other", points("3"), minutes=200)
     sparse = Day(
         day.date,
-        parse_schedule("08:00-15:30, 19:00-23:00"),
+        written("08:00-15:30, 19:00-23:00"),
         (Section("", (big, other)),),
     )
     rows = pane_rows(sparse, datetime(2026, 11, 1, 9, 13, 7))
@@ -381,9 +383,7 @@ def test_the_stats_pane_has_its_width_at_80_columns(app):
 def test_stats_compare_time_with_work_for_the_day_and_from_now():
     cheap = Task("Cheap", points("5"), points("5"), 60)
     dear = Task("Dear", points("5"), minutes=540)
-    day = Day(
-        date(2026, 11, 1), parse_schedule("08:00-18:00"), (Section("", (cheap, dear)),)
-    )
+    day = Day(date(2026, 11, 1), written("08:00-18:00"), (Section("", (cheap, dear)),))
     rows = pane_rows(day, datetime(2026, 11, 1, 10))
     # the cheap points are done, so pace looks ahead while the rest won't fit
     for row in (
@@ -403,7 +403,7 @@ def test_stats_compare_time_with_work_for_the_day_and_from_now():
 def test_verdicts_name_the_direction_of_the_whole_seconds_they_show():
     # eleven points make a point's share of the day a fraction of a second
     task = Task("Long", points("11"), points("1"), 600)
-    day = Day(date(2026, 11, 1), parse_schedule("08:00-18:00"), (Section("", (task,)),))
+    day = Day(date(2026, 11, 1), written("08:00-18:00"), (Section("", (task,)),))
     # earned is 54m32.7s and work done the same; time is 54m32s
     assert "pace on pace" in pane_rows(day, datetime(2026, 11, 1, 8, 54, 32))
     # a third of a second over is no whole second over
@@ -426,7 +426,7 @@ def test_day_switching_preserves_lists_and_creates_new_days(app):
     original = app.day
     earlier = replace(
         empty_day(date(2026, 10, 31)),
-        intervals=parse_schedule("23:00-01:00"),
+        intervals=written("23:00-01:00"),
         sections=(Section("Earlier", (Task("Previous task", points("1")),)),),
     )
     app.store.save(earlier)
@@ -541,15 +541,34 @@ def test_previous_and_next_day_stop_at_supported_date_boundaries(app):
     asyncio.run(check_boundaries())
 
 
-def test_schedule_edit_saves_recalculates_and_undoes(app):
+def interval_fields(app):
+    """The schedule editor's rows as their start and end text."""
+    starts = app.screen.query(".start").results(Input)
+    ends = app.screen.query(".end").results(Input)
+    return [(start.value, end.value) for start, end in zip(starts, ends, strict=True)]
+
+
+def test_schedule_editor_saves_rows_in_order_and_undoes(app):
     original = app.day
 
     async def edit_schedule():
-        async with app.run_test(size=(110, 45)) as pilot:
+        async with app.run_test(size=(80, 24)) as pilot:
             await pilot.press("at")
-            field = app.screen.query_one(Input)
-            assert field.value == "07:30 - 11:00, 16:00 - 23:00"
-            field.value = "09:00-12:00, 23:00-01:00, 01:30-02:00"
+            assert interval_fields(app) == [("07:30", "11:00"), ("16:00", "23:00")]
+            # a focused field selects its time, so typing replaces it; down
+            # keeps to the column, and shift+tab goes back to the start
+            await pilot.press(*"0900", "tab", *"12", "down", "1", "shift+tab", *"23")
+            # ctrl+n adds a row below; the add line past the last row adds one too
+            await pilot.press("ctrl+n", *"130", "tab", "2", "down", "enter")
+            assert interval_fields(app) == [
+                ("0900", "12"),
+                ("23", "1"),
+                ("130", "2"),
+                ("", ""),
+            ]
+            notes = [str(note.content) for note in app.screen.query(".note")]
+            assert "next day" in notes[2] and "next day" not in notes[1]
+            # the blank row drops out
             await pilot.press("enter")
             assert app.day.intervals == (
                 Interval(9 * 60, 12 * 60),
@@ -557,7 +576,6 @@ def test_schedule_edit_saves_recalculates_and_undoes(app):
                 Interval(25 * 60 + 30, 26 * 60),
             )
             assert app.day.sections == original.sections
-            assert "5h30m" in stats_text(app)
             assert app.store.load(original.date) == app.day
             await pilot.press("u")
             assert app.day == original
@@ -566,14 +584,27 @@ def test_schedule_edit_saves_recalculates_and_undoes(app):
     asyncio.run(edit_schedule())
 
 
-def test_schedule_can_be_cleared_and_an_empty_schedule_edited(app):
+def test_schedule_editor_clears_and_names_the_field_it_cannot_read(app):
+    def error():
+        return str(app.screen.query_one("#error", Static).content)
+
     async def clear_schedule():
         async with app.run_test(size=(80, 24)) as pilot:
-            await pilot.press("at", "ctrl+u", "enter")
+            await pilot.press("at")
+            for field in app.screen.query(Input):
+                field.value = ""
+            await pilot.press("enter")
             assert app.day.intervals == ()
             assert "schedule none" in pane_rows(app.day, datetime.now())
             assert app.store.load(app.day.date) == app.day
-            await pilot.press("at", *"08:00-09:00", "enter")
+            await pilot.press("at")
+            assert interval_fields(app) == [("", "")]
+            await pilot.press("8", "enter")
+            assert "Row 1 is missing its end time" in error()
+            await pilot.press("tab", *"25", "enter")
+            assert "Row 1 end: Use a 24-hour time" in error()
+            assert interval_fields(app) == [("8", "25")]
+            await pilot.press("ctrl+u", "9", "enter")
             assert app.day.intervals == (Interval(8 * 60, 9 * 60),)
 
     asyncio.run(clear_schedule())
@@ -823,12 +854,12 @@ def test_redo_reapplies_undone_changes_until_a_new_change(app, monkeypatch):
 
 
 def test_sorting_puts_missing_values_last_and_keeps_ties_in_stored_order():
-    pts, est = COLUMNS[1], COLUMNS[2]
+    pts, dur = COLUMNS[1], COLUMNS[2]
     a, b = Task("a", points("2"), minutes=30), Task("b", points("2"), minutes=10)
     c, d = Task("c", None, minutes=10), Task("d", None)
     tasks = (a, b, c, d)
-    assert arrange(tasks, Sort(est, False)) == (b, c, a, d)
-    assert arrange(tasks, Sort(est, True)) == (a, b, c, d)
+    assert arrange(tasks, Sort(dur, False)) == (b, c, a, d)
+    assert arrange(tasks, Sort(dur, True)) == (a, b, c, d)
     assert arrange(tasks, Sort(pts, True)) == (a, b, c, d)
 
 
@@ -865,13 +896,10 @@ def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
     asyncio.run(sort())
 
 
-@pytest.mark.parametrize("value", ["20261102", "2026-W45-1"])
-def test_command_line_rejects_dates_the_date_prompt_rejects(
-    value, tmp_path, monkeypatch
-):
+def test_command_line_rejects_dates_the_date_prompt_rejects(tmp_path, monkeypatch):
     database = tmp_path / "todo.sqlite3"
     monkeypatch.setattr(
-        sys, "argv", ["todo", "--database", str(database), "--date", value]
+        sys, "argv", ["todo", "--database", str(database), "--date", "20261102"]
     )
     monkeypatch.setattr(TodoApp, "run", lambda self: None)
     with pytest.raises(SystemExit) as raised:

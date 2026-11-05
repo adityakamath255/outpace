@@ -29,19 +29,20 @@ from textual.widgets.option_list import Option
 
 from .db import Store
 from .model import (
-    DAY_MINUTES,
     Day,
+    Interval,
     Section,
     Task,
-    format_schedule,
+    clock,
     interval_text,
     number,
+    parse_clock,
     parse_date,
     parse_minutes,
-    parse_schedule,
     per_point,
     percentage,
     points,
+    schedule,
     score,
     seconds_into,
     time_progress,
@@ -372,7 +373,7 @@ def schedule_rows(day: Day) -> Table:
     rows: list[tuple[str, Text]] = []
     for index, interval in enumerate(day.intervals):
         text = Text(interval_text(interval))
-        if interval.start >= DAY_MINUTES:
+        if interval.next_day:
             text.append(" next day", style="dim")
         rows.append(("schedule" if index == 0 else "", text))
     return labelled(*rows)
@@ -779,6 +780,168 @@ class TaskEditor(Form):
         self.query_one("#available", Input).focus()
 
 
+def time_field(value: str, column: str) -> Input:
+    return Input(value, restrict=r"[0-9:]*", max_length=5, compact=True, classes=column)
+
+
+def read_time(row: int, column: str, text: str) -> int:
+    """A row's start or end time, with the row and column named on failure."""
+    if not text.strip():
+        raise ValueError(f"Row {row} is missing its {column} time.")
+    try:
+        return parse_clock(text)
+    except ValueError as error:
+        raise ValueError(f"Row {row} {column}: {error}") from None
+
+
+def read_row(row: int, start: str, end: str) -> tuple[int, int] | None:
+    """A row's start and end times, or None when both are blank."""
+    if not start.strip() and not end.strip():
+        return None
+    times = read_time(row, "start", start), read_time(row, "end", end)
+    if times[0] == times[1]:
+        raise ValueError(f"Row {row} starts and ends at the same time.")
+    return times
+
+
+class AddLine(Static, can_focus=True):
+    """A line that adds an interval row when chosen, in place of a button."""
+
+    BINDINGS = [Binding("enter,space", "screen.add_row", "Add interval", show=False)]
+
+    async def on_click(self) -> None:
+        await self.run_action("screen.add_row")
+
+
+class ScheduleEditor(Form):
+    """Edits a schedule as one row per interval, written in order, so a row
+    that starts before the previous one ends falls on the next day. Blank rows
+    drop out on save; on_submit saves the intervals, raising a RECOVERABLE
+    error to keep the draft."""
+
+    BINDINGS = [
+        Binding("ctrl+n", "add_row", "Add interval", show=False),
+        Binding("up", "move(-1)", "Previous row", show=False),
+        Binding("down", "move(1)", "Next row", show=False),
+    ]
+
+    def __init__(
+        self,
+        intervals: tuple[Interval, ...],
+        on_submit: Callable[[tuple[Interval, ...]], object],
+    ):
+        super().__init__()
+        self.intervals = intervals
+        self.on_submit = on_submit
+
+    @staticmethod
+    def row(interval: Interval | None) -> Horizontal:
+        start, end = (
+            ("", "")
+            if interval is None
+            else (clock(interval.start), clock(interval.end))
+        )
+        return Horizontal(
+            time_field(start, "start"),
+            Label("-"),
+            time_field(end, "end"),
+            Static("", classes="note"),
+            classes="interval",
+        )
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog", id="schedule-dialog"):
+            yield Label("Schedule", classes="dialog-title")
+            with Vertical(id="intervals"):
+                for interval in self.intervals or (None,):
+                    yield self.row(interval)
+            yield AddLine("+ add interval", id="add-interval")
+            yield Static("", id="error", markup=False)
+            yield Static(
+                "⏎ save · esc cancel · ^n add · blank removes\n"
+                "24-hour times, like 07:30, 0730 or 7",
+                classes="muted hint",
+                markup=False,
+            )
+
+    def rows(self) -> list[tuple[Input, Input, Static]]:
+        return [
+            (
+                row.query_one(".start", Input),
+                row.query_one(".end", Input),
+                row.query_one(".note", Static),
+            )
+            for row in self.query(".interval")
+        ]
+
+    def on_mount(self) -> None:
+        self.update_notes()
+
+    @on(Input.Changed)
+    def update_notes(self) -> None:
+        """Each readable row's duration, and next day where the order carries
+        its start past midnight; nothing while the schedule can't be read."""
+        rows = self.rows()
+        readable: dict[int, tuple[int, int]] = {}
+        for row, (start, end, _) in enumerate(rows, 1):
+            try:
+                times = read_row(row, start.value, end.value)
+            except ValueError:
+                continue
+            if times is not None:
+                readable[row] = times
+        try:
+            shown = dict(zip(readable, schedule(readable.values()), strict=True))
+        except ValueError:
+            shown = {}
+        for row, (_, _, note) in enumerate(rows, 1):
+            interval = shown.get(row)
+            if interval is None:
+                note.update("")
+                continue
+            text = Text()
+            if interval.next_day:
+                text.append("next day  ", style="dim")
+            note.update(text + duration(interval.seconds))
+
+    def focused_row(self) -> Horizontal | None:
+        parent = self.focused.parent if self.focused else None
+        return parent if isinstance(parent, Horizontal) else None
+
+    async def action_add_row(self) -> None:
+        """A blank row below the focused one, or at the end."""
+        row = self.row(None)
+        await self.query_one("#intervals").mount(row, after=self.focused_row())
+        row.query_one(".start", Input).focus()
+
+    def action_move(self, offset: int) -> None:
+        """Up or down a row, keeping to the start or end column; below the
+        last row is the add line."""
+        rows = list(self.query(".interval").results(Horizontal))
+        add = self.query_one(AddLine)
+        if self.focused is add:
+            if offset < 0:
+                rows[-1].query_one(".start", Input).focus()
+            return
+        current = self.focused_row()
+        if current is None or self.focused is None:
+            return
+        index = rows.index(current) + offset
+        column = ".end" if self.focused.has_class("end") else ".start"
+        if index >= len(rows):
+            add.focus()
+        elif index >= 0:
+            rows[index].query_one(column, Input).focus()
+
+    def save(self) -> None:
+        rows = (
+            read_row(row, start.value, end.value)
+            for row, (start, end, _) in enumerate(self.rows(), 1)
+        )
+        self.on_submit(schedule(times for times in rows if times is not None))
+        self.dismiss()
+
+
 class SortMenu(ModalScreen):
     BINDINGS = [("escape", "dismiss", "Cancel")]
 
@@ -1168,15 +1331,10 @@ class TodoApp(App):
 
     def action_schedule(self) -> None:
         self.push_screen(
-            Prompt(
-                "Schedule",
-                format_schedule(self.day.intervals),
-                "⏎ save · esc cancel · 24-hour times in order, like "
-                "07:30 - 11:00, 16:00 - 23:00; past midnight continues into the "
-                "next day; blank clears",
-                lambda value: self.save_change(
-                    replace(self.day, intervals=parse_schedule(value)),
-                    "changed the schedule",
+            ScheduleEditor(
+                self.day.intervals,
+                lambda intervals: self.save_change(
+                    replace(self.day, intervals=intervals), "changed the schedule"
                 ),
             )
         )
