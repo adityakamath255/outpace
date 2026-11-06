@@ -17,6 +17,8 @@ from textual import events, on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.geometry import Offset
+from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import (
     Footer,
@@ -380,7 +382,8 @@ def schedule_rows(day: Day) -> Table:
 
 
 def stats(day: Day, now: datetime, full_title: str | None) -> Group:
-    """The day's totals, time and work per point, and verdicts on the time left.
+    """The day's totals, time and work per point, and verdicts on the time left:
+    the stats pane below the schedule.
 
     Time comes from the schedule and work from the task durations; unscored
     tasks take time, so their durations count as work never done."""
@@ -424,7 +427,7 @@ def stats(day: Day, now: datetime, full_title: str | None) -> Group:
             )
         )
 
-    blocks: list[RenderableType] = [schedule_rows(day), *totals]
+    blocks: list[RenderableType] = list(totals)
     if available and (scheduled or timed_available):
         rates = Table.grid(padding=(0, 1))
         rates.add_column(min_width=LABEL_WIDTH, style="dim", no_wrap=True)
@@ -589,6 +592,89 @@ class VimList(OptionList):
         raise RuntimeError("the task list has no selectable row")
 
 
+class TaskList(VimList):
+    """A click only moves the cursor, so the mouse can pick a row for the
+    footer or the menu without acting on it; a right-click also asks for the
+    row's menu."""
+
+    class MenuRequested(Message):
+        def __init__(self, at: Offset):
+            super().__init__()
+            # where the click landed, on the screen
+            self.at = at
+
+    def on_click(self, event: events.Click) -> None:
+        # skips OptionList's handler, which would select the row as ⏎ does
+        event.prevent_default()
+        index = event.style.meta.get("option")
+        if index is None or self.options[index].disabled:
+            return
+        self.highlighted = index
+        if event.button == 3:
+            self.post_message(self.MenuRequested(event.screen_offset))
+
+
+class MenuItem(NamedTuple):
+    key: str
+    words: str
+    run: Callable[[], object]
+
+
+class RowMenu(ModalScreen[Callable[[], object] | None]):
+    """Groups of actions, each beside its key, with a rule between groups,
+    drawn by the click that opened it. Dismisses with the chosen action,
+    which runs once the menu is gone."""
+
+    BINDINGS = [("escape", "dismiss", "Close")]
+
+    def __init__(self, groups: tuple[tuple[MenuItem, ...], ...], at: Offset):
+        super().__init__()
+        self.at = at
+        # in option order: OptionList doesn't count the rules as options
+        self.items = tuple(item for group in groups for item in group)
+        keys = max(len(item.key) for item in self.items) + 2
+        # each None draws a rule under the option before it
+        self.options: list[Text | None] = []
+        for group in groups:
+            if self.options:
+                self.options.append(None)
+            self.options.extend(
+                Text.assemble((f"{item.key:<{keys}}", "bold blue"), item.words)
+                for item in group
+            )
+
+    def compose(self) -> ComposeResult:
+        yield VimList(*self.options, id="row-menu")
+
+    def on_mount(self) -> None:
+        menu = self.query_one("#row-menu", VimList)
+        # the border and option padding take two columns or rows each, and
+        # options and rules a row each
+        width = max(line.cell_len for line in self.options if line) + 4
+        height = len(self.options) + 2
+        menu.styles.width = width
+        menu.styles.height = height
+        screen = self.app.size
+        x = min(self.at.x, max(screen.width - width, 0))
+        # below the clicked row, else above it, else as low as fits
+        y = self.at.y + 1
+        if y + height > screen.height:
+            y = self.at.y - height
+        if y < 0:
+            y = max(screen.height - height, 0)
+        menu.styles.offset = (x, y)
+        # the mouse opened it, so only the hover marks a choice
+        menu.highlighted = None
+
+    def on_click(self, event: events.Click) -> None:
+        if event.widget is self:
+            self.dismiss(None)
+
+    @on(OptionList.OptionSelected)
+    def choose(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss(self.items[event.option_index].run)
+
+
 class TaskPane(Vertical):
     """The column names, the task list and its hint, all drawn from one
     View. The cursor stays on a row the view shows and may select."""
@@ -596,7 +682,7 @@ class TaskPane(Vertical):
     def compose(self) -> ComposeResult:
         yield Static(header_row(None), id="columns")
         with Vertical(id="list-area"):
-            yield VimList(id="tasks")
+            yield TaskList(id="tasks")
             yield Static("", id="empty")
 
     @property
@@ -650,6 +736,36 @@ class VimScroll(VerticalScroll):
     ]
 
 
+class LineButton(Static):
+    """Text that runs an action when clicked."""
+
+    def __init__(self, label: str, action: str, **kwargs):
+        super().__init__(label, markup=False, **kwargs)
+        self.action = action
+
+    async def on_click(self) -> None:
+        await self.action_press()
+
+    async def action_press(self) -> None:
+        await self.run_action(self.action)
+
+
+def bottom_row(note: str, *buttons: tuple[str, str]) -> Horizontal:
+    """A dialog's last row: a note on what it accepts, then a button for each
+    label and action."""
+    return Horizontal(
+        Static(note, id="hint", classes="muted", markup=False),
+        *(LineButton(label, action, classes="button") for label, action in buttons),
+        classes="bottom-row",
+    )
+
+
+def save_and_cancel(
+    note: str, verb: str = "save", cancel: str = "cancel"
+) -> Horizontal:
+    return bottom_row(note, (verb, "screen.save"), (cancel, "screen.dismiss"))
+
+
 class Form(ModalScreen):
     """A dialog whose save either succeeds or keeps the draft and says why.
 
@@ -680,12 +796,18 @@ class Prompt(Form):
     keep the prompt open with the reason shown."""
 
     def __init__(
-        self, title: str, value: str, hint: str, on_submit: Callable[[str], object]
+        self,
+        title: str,
+        value: str,
+        verb: str,
+        note: str,
+        on_submit: Callable[[str], object],
     ):
         super().__init__()
         self.title_text = title
         self.value = value
-        self.hint = hint
+        self.verb = verb
+        self.note = note
         self.on_submit = on_submit
 
     def compose(self) -> ComposeResult:
@@ -693,7 +815,7 @@ class Prompt(Form):
             yield Label(self.title_text, classes="dialog-title", markup=False)
             yield Input(self.value, compact=True)
             yield Static("", id="error", markup=False)
-            yield Static(self.hint, classes="muted hint", markup=False)
+            yield save_and_cancel(self.note, self.verb)
 
     def save(self) -> None:
         self.on_submit(self.query_one(Input).value)
@@ -717,10 +839,6 @@ class TaskEditor(Form):
         self.edited_task = task
         self.heading = heading
         self.on_submit = on_submit
-        if task:
-            self.keys = "⏎ save · esc cancel"
-        else:
-            self.keys = "⏎ add and start the next · esc close"
 
     def compose(self) -> ComposeResult:
         task = self.edited_task
@@ -755,12 +873,15 @@ class TaskEditor(Form):
             yield Static("", id="error", markup=False)
             # the list is hidden behind the dialog, so confirm each added task
             yield Static("", id="added", classes="muted", markup=False)
-            yield Static(self.keys, id="hint", classes="muted hint", markup=False)
+            # adding saves each task, so closing loses nothing
+            if self.edited_task:
+                yield save_and_cancel("")
+            else:
+                yield save_and_cancel("", "add", "close")
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
-        note = self.FIELD_HINTS.get(event.widget.id or "")
-        hint = f"{self.keys} · {note}" if note else self.keys
-        self.query_one("#hint", Static).update(hint)
+        note = self.FIELD_HINTS.get(event.widget.id or "", "")
+        self.query_one("#hint", Static).update(note)
 
     def save(self) -> None:
         available_text = self.query_one("#available", Input).value.strip()
@@ -804,13 +925,11 @@ def read_row(row: int, start: str, end: str) -> tuple[int, int] | None:
     return times
 
 
-class AddLine(Static, can_focus=True):
-    """A line that adds an interval row when chosen, in place of a button."""
+class AddLine(LineButton, can_focus=True):
+    """The line under the schedule's rows that adds one; up and down reach it,
+    so the keyboard can add a row past the last."""
 
-    BINDINGS = [Binding("enter,space", "screen.add_row", "Add interval", show=False)]
-
-    async def on_click(self) -> None:
-        await self.run_action("screen.add_row")
+    BINDINGS = [Binding("enter,space", "press", "Add interval", show=False)]
 
 
 class ScheduleEditor(Form):
@@ -820,7 +939,10 @@ class ScheduleEditor(Form):
     error to keep the draft."""
 
     BINDINGS = [
-        Binding("ctrl+n", "add_row", "Add interval", show=False),
+        # priority, since a focused field takes printable keys first; the
+        # fields refuse + and - anyway
+        Binding("plus", "add_row", "Add interval", show=False, priority=True),
+        Binding("minus", "remove_row", "Remove interval", show=False, priority=True),
         Binding("up", "move(-1)", "Previous row", show=False),
         Binding("down", "move(1)", "Next row", show=False),
     ]
@@ -852,17 +974,23 @@ class ScheduleEditor(Form):
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog", id="schedule-dialog"):
             yield Label("Schedule", classes="dialog-title")
+            yield Static(
+                "24-hour times, like 07:30, 0730 or 7",
+                id="time-format",
+                classes="muted",
+                markup=False,
+            )
             with Vertical(id="intervals"):
                 for interval in self.intervals or (None,):
                     yield self.row(interval)
-            yield AddLine("+ add interval", id="add-interval")
+            with Horizontal(id="row-actions"):
+                yield AddLine("+ add interval", "screen.add_row", classes="row-action")
+                # unfocusable, so a click leaves focus on the row it removes
+                yield LineButton(
+                    "- remove interval", "screen.remove_row", classes="row-action"
+                )
             yield Static("", id="error", markup=False)
-            yield Static(
-                "⏎ save · esc cancel · ^n add · blank removes\n"
-                "24-hour times, like 07:30, 0730 or 7",
-                classes="muted hint",
-                markup=False,
-            )
+            yield save_and_cancel("")
 
     def rows(self) -> list[tuple[Input, Input, Static]]:
         return [
@@ -906,7 +1034,9 @@ class ScheduleEditor(Form):
 
     def focused_row(self) -> Horizontal | None:
         parent = self.focused.parent if self.focused else None
-        return parent if isinstance(parent, Horizontal) else None
+        if isinstance(parent, Horizontal) and parent.has_class("interval"):
+            return parent
+        return None
 
     async def action_add_row(self) -> None:
         """A blank row below the focused one, or at the end."""
@@ -920,18 +1050,40 @@ class ScheduleEditor(Form):
         rows = list(self.query(".interval").results(Horizontal))
         add = self.query_one(AddLine)
         if self.focused is add:
-            if offset < 0:
+            if offset < 0 and rows:
                 rows[-1].query_one(".start", Input).focus()
             return
         current = self.focused_row()
-        if current is None or self.focused is None:
+        if current is None:
             return
         index = rows.index(current) + offset
-        column = ".end" if self.focused.has_class("end") else ".start"
         if index >= len(rows):
             add.focus()
         elif index >= 0:
-            rows[index].query_one(column, Input).focus()
+            rows[index].query_one(self.focused_column(), Input).focus()
+
+    def focused_column(self) -> str:
+        """The selector of the focused field's column."""
+        focused = self.focused
+        return ".end" if focused is not None and focused.has_class("end") else ".start"
+
+    async def action_remove_row(self) -> None:
+        """Removes the focused row, keeping to its column in the row that takes
+        its place, else the row above, else the add line."""
+        current = self.focused_row()
+        if current is None:
+            return
+        column = self.focused_column()
+        rows = list(self.query(".interval").results(Horizontal))
+        index = rows.index(current)
+        rows.pop(index)
+        await current.remove()
+        if rows:
+            rows[min(index, len(rows) - 1)].query_one(column, Input).focus()
+        else:
+            self.query_one(AddLine).focus()
+        # a later row's start may no longer fall on the next day
+        self.update_notes()
 
     def save(self) -> None:
         rows = (
@@ -964,7 +1116,7 @@ class SortMenu(ModalScreen):
         with Vertical(classes="dialog", id="sort-dialog"):
             yield Label("Sort tasks across sections", classes="dialog-title")
             yield VimList(*options, id="sort-options")
-            yield Static("⏎ sort · esc cancel", classes="muted hint", markup=False)
+            yield bottom_row("", ("cancel", "screen.dismiss"))
 
     def on_mount(self) -> None:
         self.query_one(VimList).highlighted = self.choices.index(self.current)
@@ -992,6 +1144,7 @@ class HelpScreen(ModalScreen):
                 text.append(description)
         with VimScroll(classes="dialog", id="help-dialog"):
             yield Static(text)
+            yield bottom_row("", ("close", "screen.dismiss"))
 
 
 class TodoApp(App):
@@ -1052,10 +1205,17 @@ class TodoApp(App):
             self._unnotify(notification)
 
     def compose(self) -> ComposeResult:
-        yield Static("", id="date")
+        with Horizontal(id="date-line"):
+            yield LineButton("‹", "app.shift_day(-1)", classes="link")
+            yield Static("", id="date")
+            yield LineButton("›", "app.shift_day(1)", classes="link")
+            yield LineButton("jump to today", "app.today", id="today", classes="button")
+            yield LineButton("", "app.toggle_done", id="hidden", classes="link")
         with Horizontal(id="body"):
             yield TaskPane(id="task-pane")
-            yield Static("", id="stats")
+            with Vertical(id="stats"):
+                yield LineButton("", "app.schedule", id="schedule")
+                yield Static("", id="totals")
         yield Footer(compact=True)
 
     def on_mount(self) -> None:
@@ -1069,7 +1229,8 @@ class TodoApp(App):
             Prompt(
                 "Open a day's list",
                 self.day.date.isoformat(),
-                "⏎ open · esc cancel · YYYY-MM-DD; a new date starts an empty list",
+                "open",
+                "YYYY-MM-DD; a new date starts empty",
                 lambda value: self.switch_day(parse_date(value)),
             )
         )
@@ -1129,12 +1290,20 @@ class TodoApp(App):
     def redraw(self, selection: str | None = None) -> None:
         current = self.current_view()
         self.query_one(TaskPane).show(current, selection)
-        line = Text(f"{self.day.date:%a} {self.day.date.isoformat()}", style="bold")
-        if self.hide_done:
-            line.append(f"   {current.hidden} done hidden · ", style="dim")
-            line.append("f", style="bold blue")
-            line.append(" shows them", style="dim")
-        self.query_one("#date", Static).update(line)
+        self.query_one("#date", Static).update(
+            Text(f"{self.day.date:%a} {self.day.date.isoformat()}", style="bold")
+        )
+        self.query_one("#schedule", Static).update(schedule_rows(self.day))
+        self.query_one("#today").display = self.day.date != date.today()
+        hidden = self.query_one("#hidden", LineButton)
+        hidden.display = self.hide_done
+        hidden.update(
+            Text.assemble(
+                (f"{current.hidden} done hidden · ", "dim"),
+                ("f", "bold blue"),
+                (" shows them", "dim"),
+            )
+        )
         self.refresh_stats()
 
     def refresh_stats(self) -> None:
@@ -1148,13 +1317,78 @@ class TodoApp(App):
             width = tasks.scrollable_content_region.width - 2 - FIXED_WIDTH
             if Text(task.title).cell_len > width:
                 full_title = task.title
-        self.query_one("#stats", Static).update(
+        self.query_one("#totals", Static).update(
             stats(self.day, datetime.now(), full_title)
         )
 
     @on(OptionList.OptionHighlighted, "#tasks")
     def highlighted(self) -> None:
         self.refresh_stats()
+
+    @on(TaskList.MenuRequested)
+    def open_row_menu(self, event: TaskList.MenuRequested) -> None:
+        self.push_screen(
+            RowMenu((self.row_actions(), self.day_actions()), event.at),
+            self.run_chosen,
+        )
+
+    def run_chosen(self, action: Callable[[], object] | None) -> None:
+        if action is not None:
+            action()
+
+    def row_actions(self) -> tuple[MenuItem, ...]:
+        """What the selected row's keys do, most used first. Actions refused
+        while sorted stay listed, and say why when chosen."""
+        _, task = self.selected()
+        items: list[MenuItem] = []
+        if task is None:
+            items += [
+                MenuItem("e", "rename", self.action_edit),
+                MenuItem("o", "add tasks", lambda: self.action_add(True)),
+                MenuItem("#", "new section", self.action_new_section),
+            ]
+        else:
+            if task.available is not None:
+                items += [
+                    MenuItem(
+                        "space",
+                        "not done" if task.complete else "done",
+                        self.action_complete,
+                    ),
+                    MenuItem("⏎", "set points", self.activate),
+                    MenuItem("+", "point up", lambda: self.action_step(1)),
+                    MenuItem("-", "point down", lambda: self.action_step(-1)),
+                ]
+            items += [
+                MenuItem("e", "edit", self.action_edit),
+                MenuItem("o", "add below", lambda: self.action_add(True)),
+                MenuItem("O", "add above", lambda: self.action_add(False)),
+            ]
+        items += [
+            MenuItem("J", "move down", lambda: self.action_move(1)),
+            MenuItem("K", "move up", lambda: self.action_move(-1)),
+        ]
+        if self.deleted is not None:
+            items += [
+                MenuItem("p", "put below", lambda: self.action_put(True)),
+                MenuItem("P", "put above", lambda: self.action_put(False)),
+            ]
+        items.append(MenuItem("x", "delete", self.action_delete))
+        return tuple(items)
+
+    def day_actions(self) -> tuple[MenuItem, ...]:
+        """The keys with no place on the date line or in the footer."""
+        return (
+            MenuItem("T", "open a date", self.action_choose_day),
+            MenuItem("c", "copy a day", self.action_reuse),
+            MenuItem(
+                "f",
+                "show done" if self.hide_done else "hide done",
+                self.action_toggle_done,
+            ),
+            MenuItem("^r", "redo", self.action_redo),
+            MenuItem("q", "quit", self.exit),
+        )
 
     @on(OptionList.OptionSelected, "#tasks")
     def activate(self) -> None:
@@ -1242,9 +1476,7 @@ class TodoApp(App):
                 section.id,
             )
 
-        self.push_screen(
-            Prompt("New section", "", "⏎ add · esc cancel · blank for untitled", create)
-        )
+        self.push_screen(Prompt("New section", "", "add", "blank for untitled", create))
 
     def action_reuse(self) -> None:
         try:
@@ -1270,7 +1502,8 @@ class TodoApp(App):
             Prompt(
                 f"Replace the list for {self.day.date:%a %Y-%m-%d} with a copy of",
                 latest.isoformat(),
-                "⏎ copy · esc cancel · progress starts over; u undoes",
+                "copy",
+                "progress starts over; u undoes",
                 reuse,
             )
         )
@@ -1304,7 +1537,8 @@ class TodoApp(App):
             Prompt(
                 "Rename section",
                 section.title,
-                "⏎ save · esc cancel · blank for untitled",
+                "save",
+                "blank for untitled",
                 rename,
             )
         )
@@ -1324,7 +1558,8 @@ class TodoApp(App):
             Prompt(
                 f"Points earned on {task.title}",
                 number(task.earned),
-                f"⏎ save · esc cancel · out of {number(available)}",
+                "save",
+                f"out of {number(available)}",
                 save,
             )
         )

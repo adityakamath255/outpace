@@ -14,12 +14,16 @@ from textual.widgets import Footer, Input, Static
 from todo.app import (
     COLUMNS,
     PANE_WIDTH,
+    LineButton,
+    RowMenu,
+    ScheduleEditor,
     SectionRule,
     Sort,
     TodoApp,
     arrange,
     duration,
     main,
+    schedule_rows,
     stats,
     subtotal_row,
 )
@@ -55,7 +59,9 @@ def pane_rows(day, now):
     """The stats pane at the width it has at 80 columns, one row per line with
     its cells separated by single spaces."""
     output = StringIO()
-    Console(file=output, width=PANE_WIDTH).print(stats(day, now, None))
+    console = Console(file=output, width=PANE_WIDTH)
+    console.print(schedule_rows(day))
+    console.print(stats(day, now, None))
     return [" ".join(line.split()) for line in output.getvalue().splitlines()]
 
 
@@ -558,8 +564,9 @@ def test_schedule_editor_saves_rows_in_order_and_undoes(app):
             # a focused field selects its time, so typing replaces it; down
             # keeps to the column, and shift+tab goes back to the start
             await pilot.press(*"0900", "tab", *"12", "down", "1", "shift+tab", *"23")
-            # ctrl+n adds a row below; the add line past the last row adds one too
-            await pilot.press("ctrl+n", *"130", "tab", "2", "down", "enter")
+            # + adds a row below, though a field has focus; the add line past
+            # the last row adds one too
+            await pilot.press("plus", *"130", "tab", "2", "down", "enter")
             assert interval_fields(app) == [
                 ("0900", "12"),
                 ("23", "1"),
@@ -568,12 +575,15 @@ def test_schedule_editor_saves_rows_in_order_and_undoes(app):
             ]
             notes = [str(note.content) for note in app.screen.query(".note")]
             assert "next day" in notes[2] and "next day" not in notes[1]
+            # - removes the focused row, keeping to its column in the next one
+            await pilot.press("up", "tab", "minus")
+            assert interval_fields(app) == [("0900", "12"), ("23", "1"), ("", "")]
+            assert app.screen.focused is list(app.screen.query(".end"))[-1]
             # the blank row drops out
             await pilot.press("enter")
             assert app.day.intervals == (
                 Interval(9 * 60, 12 * 60),
                 Interval(23 * 60, 25 * 60),
-                Interval(25 * 60 + 30, 26 * 60),
             )
             assert app.day.sections == original.sections
             assert app.store.load(original.date) == app.day
@@ -650,6 +660,79 @@ def test_keys_on_a_section_rule_act_on_the_section(app):
             assert app.store.load(original.date) == original
 
     asyncio.run(edit_sections())
+
+
+def test_a_click_selects_and_a_right_click_acts_on_the_clicked_row(app):
+    original = app.day
+    (section,) = original.sections
+    (practice,) = section.tasks
+
+    async def click_rows():
+        async with app.run_test(size=(120, 35)) as pilot:
+            # row 0 is the rule; a click on the scored task below it selects
+            # it without opening its points, as ⏎ would
+            assert await pilot.click("#tasks", offset=(10, 0))
+            assert await pilot.click("#tasks", offset=(10, 1))
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.selected() == (section, practice)
+            # from the rule, a right-click on the task acts on the task
+            await pilot.press("g")
+            assert await pilot.click("#tasks", offset=(10, 1), button=3)
+            menu = app.screen
+            assert isinstance(menu, RowMenu)
+            delete = [item.words for item in menu.items].index("delete")
+            # the menu's border takes its first row
+            assert await pilot.click("#row-menu", offset=(2, delete + 1))
+            await pilot.pause()
+            assert app.deleted is not None and app.deleted.row == practice
+            # an item below the rule between groups, which takes a row but
+            # isn't an option
+            assert await pilot.click("#tasks", offset=(10, 0), button=3)
+            menu = app.screen
+            assert isinstance(menu, RowMenu)
+            lines = [str(line) if line else None for line in menu.options]
+            hide = next(
+                i for i, line in enumerate(lines) if line and "hide done" in line
+            )
+            assert await pilot.click("#row-menu", offset=(2, hide + 1))
+            await pilot.pause()
+            assert app.hide_done
+
+    asyncio.run(click_rows())
+
+
+def test_the_date_line_schedule_and_dialog_buttons_work_by_mouse(app):
+    original = app.day
+
+    def button(label):
+        return next(b for b in app.screen.query(LineButton) if str(b.content) == label)
+
+    async def edit_by_mouse():
+        async with app.run_test(size=(80, 24)) as pilot:
+            assert await pilot.click(button("›"))
+            assert app.day.date == date(2026, 11, 2)
+            assert await pilot.click(button("jump to today"))
+            assert app.day.date == date.today()
+            assert not app.query_one("#today").display
+            app.switch_day(original.date)
+            assert await pilot.click("#schedule")
+            assert isinstance(app.screen, ScheduleEditor)
+            # the first row's start has focus, and the click keeps it there
+            assert await pilot.click(button("- remove interval"))
+            assert interval_fields(app) == [("16:00", "23:00")]
+            for field in app.screen.query(Input):
+                field.value = ""
+            assert await pilot.click(button("cancel"))
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day == original
+            assert await pilot.click("#schedule")
+            for field in app.screen.query(Input):
+                field.value = ""
+            assert await pilot.click(button("save"))
+            assert not isinstance(app.screen, ModalScreen)
+            assert app.day.intervals == ()
+
+    asyncio.run(edit_by_mouse())
 
 
 def test_lowering_available_points_caps_earned_points(app):
@@ -922,7 +1005,7 @@ def test_f_hides_done_tasks_in_both_views_until_pressed_again(app):
         async with app.run_test(size=(110, 45)) as pilot:
             await pilot.press("f")
             assert shown() == [a.id, p.id, b.id, q.id]
-            assert "2 done hidden" in str(app.query_one("#date").content)
+            assert "2 done hidden" in str(app.query_one("#hidden").content)
             # a move could swap with a hidden task, so it is refused
             await pilot.press("g", "j", "J")
             assert app.day == day
@@ -941,6 +1024,6 @@ def test_f_hides_done_tasks_in_both_views_until_pressed_again(app):
             assert app.query_one("#empty").display
             await pilot.press("f")
             assert len(shown()) == 6
-            assert "hidden" not in str(app.query_one("#date").content)
+            assert not app.query_one("#hidden").display
 
     asyncio.run(filter_done())

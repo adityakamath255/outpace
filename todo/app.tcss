@@ -3,9 +3,26 @@ Screen {
     color: ansi_default;
 }
 
-#date {
+/* the arrows' padding stands in for the margin, so the glyph sits where the
+   date used to start */
+#date-line {
     height: 1;
-    margin: 0 1;
+}
+
+#date-line > * {
+    width: auto;
+}
+
+.link {
+    padding: 0 1;
+}
+
+.link:hover {
+    background: ansi_black;
+}
+
+#hidden {
+    margin-left: 1;
 }
 
 #body {
@@ -83,6 +100,21 @@ VimList > .option-list--option-hover {
     border-left: solid ansi_black;
 }
 
+/* as wide as its rows, so the hover ends where the values do */
+#schedule {
+    width: auto;
+    height: auto;
+}
+
+#schedule:hover {
+    background: ansi_black;
+}
+
+#totals {
+    height: auto;
+    margin-top: 1;
+}
+
 Footer {
     background: ansi_default;
 }
@@ -150,8 +182,35 @@ ModalScreen {
     color: ansi_red;
 }
 
-.hint {
+.bottom-row {
+    height: auto;
     margin-top: 1;
+}
+
+#hint {
+    width: 1fr;
+}
+
+.button {
+    width: auto;
+    margin-left: 2;
+    padding: 0 1;
+    background: ansi_black;
+}
+
+.button:hover {
+    text-style: bold;
+}
+
+/* a context menu over the list, which stays visible around it */
+RowMenu {
+    align: left top;
+    background: transparent;
+}
+
+#row-menu, #row-menu:focus {
+    border: round ansi_blue;
+    scrollbar-gutter: auto;
 }
 
 Toast {
@@ -203,12 +262,29 @@ Toast {
     width: 50;
 }
 
+/* the time format reads as the title's second line */
+#schedule-dialog .dialog-title {
+    margin-bottom: 0;
+}
+
+#time-format {
+    margin-bottom: 1;
+}
+
+/* outside the scrolled keys, so close stays in view */
+#help-dialog .bottom-row {
+    dock: bottom;
+}
+
 #intervals {
     height: auto;
 }
 
+/* a blank row between intervals, so their fields don't merge into a block;
+   the add and remove lines take the place of the next row */
 .interval {
     height: 1;
+    margin-bottom: 1;
 }
 
 /* room for 23:59 and the cursor */
@@ -226,13 +302,19 @@ Toast {
     text-align: right;
 }
 
-#add-interval {
+#row-actions {
+    height: 1;
+}
+
+/* padded like the fields, so their text starts at the times' first digit */
+.row-action {
     width: auto;
+    margin-right: 2;
     padding: 0 1;
     text-style: dim;
 }
 
-#add-interval:focus {
+.row-action:hover, .row-action:focus {
     background: ansi_black;
     text-style: bold;
 }
