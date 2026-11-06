@@ -696,10 +696,13 @@ class TaskPane(Vertical):
 
     def show(self, view: View, selection: str | None = None) -> None:
         """Draws view, selecting the row selection names if shown, else the
-        row that was selected, else the nearest row where the cursor was."""
+        row that was selected, else the nearest row where the cursor was.
+        The list stays scrolled where it was unless the selection is out of
+        sight."""
         widget = self.query_one(VimList)
         selection = selection or self.selected_id
         old_index = widget.highlighted
+        scrolled = widget.scroll_y
         options: list[Option] = []
         if view.flat is not None:
             options = [Option(task_row(task), id=task.id) for task in view.flat]
@@ -713,6 +716,9 @@ class TaskPane(Vertical):
                 if subtotal is not None:
                     options.append(Option(subtotal, disabled=True))
         widget.set_options(options)
+        # set_options scrolls to the top; the highlight below then scrolls
+        # only as far as it must
+        widget.scroll_y = scrolled
         ids = [option.id for option in options]
         if selection is not None and selection in ids:
             widget.highlighted = ids.index(selection)

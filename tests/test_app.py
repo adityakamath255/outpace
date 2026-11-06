@@ -876,6 +876,26 @@ def test_a_long_list_ends_above_the_footer(app):
     asyncio.run(scroll_to_end())
 
 
+def test_a_change_keeps_the_list_where_it_was_scrolled(app):
+    tasks = tuple(Task(f"task {n}", points("3")) for n in range(60))
+    app.store.save(replace(app.day, sections=(Section("Many", tasks),)))
+    app = TodoApp(app.store, app.day.date)
+
+    async def change_mid_screen():
+        async with app.run_test(size=(80, 24)) as pilot:
+            # scrolled to the end, with the cursor partway up the screen
+            await pilot.press("G", *"k" * 8)
+            task_list = app.query_one("#tasks")
+            scrolled = task_list.scroll_offset.y
+            selected = app.selected()[1]
+            assert selected is not None
+            await pilot.press("plus")
+            assert app.selected()[1] == replace(selected, earned=1)
+            assert task_list.scroll_offset.y == scrolled
+
+    asyncio.run(change_mid_screen())
+
+
 def test_ctrl_d_and_ctrl_u_move_half_a_page(app):
     tasks = tuple(Task(f"task {n}", None) for n in range(60))
     app.store.save(replace(app.day, sections=(Section("Many", tasks),)))
