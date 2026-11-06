@@ -195,12 +195,16 @@ def test_schedule_rejects_intervals_out_of_order():
         schedule([(450, 660), (630, 720)])
 
 
-def test_day_accepts_touching_intervals_and_rejects_partial_overlap():
+def test_day_accepts_touching_intervals_and_rejects_overlap_or_over_a_day():
     first, touching = schedule([(450, 660), (660, 720)])
     day = Day(DAY, (touching, first), (Section("Tasks"),))
     assert time_progress(day.intervals, 12 * HOUR) == (16200, 16200)
     with pytest.raises(ValueError, match="overlap"):
         replace(day, intervals=(first, Interval(10 * 60 + 59, 12 * 60)))
+    # the limit schedule() keeps, held by every day however it is built
+    assert replace(day, intervals=(Interval(0, 24 * 60),)).intervals
+    with pytest.raises(ValueError, match="24 hours"):
+        replace(day, intervals=(first, Interval(24 * 60, 48 * 60)))
 
 
 def test_report_matches_the_original_calculations():

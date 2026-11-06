@@ -152,6 +152,12 @@ def parse_clock(text: str) -> int:
     return int(match[1]) * 60 + int(match[2] or 0)
 
 
+def over_a_day(intervals: tuple[Interval, ...]) -> bool:
+    """Whether intervals, in start order and not overlapping, end more than 24
+    hours after the first starts."""
+    return bool(intervals) and intervals[-1].end - intervals[0].start > DAY_MINUTES
+
+
 def schedule(clocks: Iterable[tuple[int, int]]) -> tuple[Interval, ...]:
     """Intervals from start and end clock times, in minutes, written in order.
 
@@ -164,8 +170,9 @@ def schedule(clocks: Iterable[tuple[int, int]]) -> tuple[Interval, ...]:
         while start < previous_end:
             start += DAY_MINUTES
         intervals.append(Interval(start, start + (end - start) % DAY_MINUTES))
-    # an interval written out of order would otherwise roll silently into tomorrow
-    if intervals and intervals[-1].end - intervals[0].start > DAY_MINUTES:
+    # an interval written out of order would otherwise roll silently into
+    # tomorrow; Day would refuse it too, but without saying how to fix it
+    if over_a_day(tuple(intervals)):
         raise ValueError(
             "The schedule spans more than 24 hours; write its intervals in order."
         )
@@ -211,6 +218,8 @@ class Day:
         object.__setattr__(self, "intervals", ordered)
         if any(a.end > b.start for a, b in pairwise(ordered)):
             raise ValueError("Scheduled intervals cannot overlap.")
+        if over_a_day(ordered):
+            raise ValueError("A schedule cannot span more than 24 hours.")
         ids = [section.id for section in self.sections]
         ids += [task.id for task in self.tasks()]
         if len(ids) != len(set(ids)):
