@@ -3,9 +3,11 @@ Screen {
     color: ansi_default;
 }
 
-/* no margin: the arrows' padding is the line's left edge */
+/* no left margin: the arrows' padding is the line's left edge. The right padding
+   ends the mode switch at the task list's right edge */
 #date-line {
     height: 1;
+    padding-right: 2;
 }
 
 #date-line > * {
@@ -45,14 +47,16 @@ Screen {
     text-style: dim;
 }
 
-#body {
-    height: 1fr;
-    margin: 0 1;
+/* padded like the column names, to share the task list's edges */
+#summary {
+    height: auto;
+    margin: 1 1 0 1;
+    padding: 0 2 0 1;
 }
 
 #task-pane {
-    width: 74;
-    max-width: 65%;
+    height: 1fr;
+    margin: 0 1;
 }
 
 #columns {
@@ -112,14 +116,6 @@ VimList > .option-list--option-hover {
     color: ansi_blue;
 }
 
-#stats {
-    width: 1fr;
-    height: 100%;
-    margin-left: 1;
-    padding-left: 1;
-    border-left: solid ansi_black;
-}
-
 /* auto width keeps the hover background inside the values */
 #schedule {
     width: auto;
@@ -132,7 +128,6 @@ VimList > .option-list--option-hover {
 
 #totals {
     height: auto;
-    margin-top: 1;
 }
 
 Footer {
@@ -262,7 +257,8 @@ Toast {
     margin-right: 2;
 }
 
-#available {
+/* two classes, to outrank .dialog Input */
+.dialog .points-field, .dialog .points-field:focus {
     width: 7;
 }
 
@@ -318,7 +314,7 @@ Toast {
 }
 
 /* room for 2026-11-20 and the cursor; two classes, to outrank .dialog Input */
-.span-row .date-field, .span-row .date-field:focus {
+.dialog .date-field, .dialog .date-field:focus {
     width: 13;
 }
 

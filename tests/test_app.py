@@ -13,21 +13,22 @@ from textual.widgets import Footer, Input, Static
 
 from todo.app import (
     COLUMNS,
-    PANE_WIDTH,
     LineButton,
     ListPicker,
     RowMenu,
     ScheduleEditor,
     SectionRule,
+    Shown,
     Sort,
+    Summary,
     TodoApp,
     VimList,
     arrange,
     duration,
+    header_row,
     main,
-    stats,
+    schedule_row,
     subtotal_row,
-    time_rows,
 )
 from todo.db import Store
 from todo.model import (
@@ -58,13 +59,13 @@ async def add_task(pilot, title):
     await pilot.press("enter", "escape")
 
 
-def pane_rows(day, now):
-    """The stats pane at the width it has at 80 columns, one row per line with
-    its cells separated by single spaces."""
+def summary_lines(day, now):
+    """The summary at the width it has at 80 columns, its cells separated by single
+    spaces."""
     output = StringIO()
-    console = Console(file=output, width=PANE_WIDTH)
-    console.print(time_rows(day))
-    console.print(stats(day, now, None))
+    console = Console(file=output, width=78)
+    console.print(schedule_row(day))
+    console.print(Summary(day, now, None))
     return [" ".join(line.split()) for line in output.getvalue().splitlines()]
 
 
@@ -360,30 +361,24 @@ def test_help_lists_every_key_binding(app):
     asyncio.run(open_and_close())
 
 
-def test_stats_fit_the_pane_at_80_columns():
+def test_the_summary_fits_80_columns():
     day = Day(
         date(2026, 11, 1),
         written("07:30-23:00"),
         (Section("", (Task("Practice", points("5"), points("2"), 30),)),),
     )
     # over ten hours elapsed, with seconds, makes the widest time row
-    rows = pane_rows(day, datetime(2026, 11, 1, 18, 22, 26))
-    assert "time 10h52m26s / 15h30m" in rows
-
-
-def test_the_stats_pane_has_its_width_at_80_columns(app):
-    async def measure():
-        async with app.run_test(size=(80, 24)):
-            assert app.query_one("#stats").content_region.width == PANE_WIDTH
-
-    asyncio.run(measure())
+    lines = summary_lines(day, datetime(2026, 11, 1, 18, 22, 26))
+    time_line = next(line for line in lines if line.startswith("time "))
+    assert time_line.startswith("time 10h52m26s / 15h30m")
+    assert time_line.endswith("70.15%")
 
 
 def test_stats_compare_time_with_work():
     cheap = Task("Cheap", points("5"), points("5"), 60)
     dear = Task("Dear", points("5"), minutes=600)
     day = Day(date(2026, 11, 1), written("08:00-18:00"), (Section("", (cheap, dear)),))
-    rows = pane_rows(day, datetime(2026, 11, 1, 10))
+    text = "\n".join(summary_lines(day, datetime(2026, 11, 1, 10)))
     # the cheap points are done, so pace looks ahead while the day is overbooked
     for row in (
         "time 2h / 10h",
@@ -395,7 +390,7 @@ def test_stats_compare_time_with_work():
         "pace ahead 3h",
         "margin -10.00%",
     ):
-        assert row in rows
+        assert row in text
 
 
 def test_pace_compares_whole_seconds():
@@ -403,13 +398,21 @@ def test_pace_compares_whole_seconds():
     task = Task("Long", points("11"), points("1"), 600)
     day = Day(date(2026, 11, 1), written("08:00-18:00"), (Section("", (task,)),))
     # earned is 54m32.7s; time is 54m32s
-    assert "pace on pace" in pane_rows(day, datetime(2026, 11, 1, 8, 54, 32))
+    lines = summary_lines(day, datetime(2026, 11, 1, 8, 54, 32))
+    assert any(line.startswith("pace on pace") for line in lines)
+
+
+def test_the_table_leaves_out_columns_no_task_has_a_value_for():
+    unscored = (Task("a", None), Task("b", None, minutes=30))
+    output = StringIO()
+    Console(file=output, width=80).print(header_row(None, Shown.of(unscored)))
+    assert output.getvalue().split() == ["title", "dur"]
 
 
 def test_subtotal_shows_how_much_of_its_section_is_done():
     section = Section("", (Task("A", points("4"), points("1")), Task("B", points("4"))))
     output = StringIO()
-    Console(file=output, width=80).print(subtotal_row(section))
+    Console(file=output, width=80).print(subtotal_row(section, Shown.of(section.tasks)))
     assert "subtotal  12.50%" in output.getvalue()
 
 
@@ -590,7 +593,7 @@ def test_schedule_editor_clears_and_names_the_field_it_cannot_read(app):
                 field.value = ""
             await pilot.press("enter")
             assert app.day.intervals == ()
-            assert "schedule none" in pane_rows(app.day, datetime.now())
+            assert "schedule none" in summary_lines(app.day, datetime.now())
             assert app.store.load(app.day.date) == app.day
             await pilot.press("at")
             assert interval_fields(app) == [("", "")]
@@ -972,7 +975,8 @@ def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
             assert app.day == day
             assert not isinstance(app.screen, ModalScreen)
             # clicks on pts: most first, then fewest first, then stored order
-            pts = 1 + 2 + 7
+            # past the padding, the marker, the gap and done/
+            pts = 1 + 1 + 2 + 5 + 1
             assert await pilot.click("#columns", offset=(pts, 0))
             assert shown() == [b.id, a.id, c.id]
             assert await pilot.click("#columns", offset=(pts, 0))
