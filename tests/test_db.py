@@ -1,12 +1,12 @@
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
 from todo.db import Store, decode
-from todo.model import Day, Section, Task, empty_day, points
+from todo.model import Day, Section, Span, Task, empty_day, points
 
 DAY = date(2026, 11, 1)
 
@@ -73,8 +73,33 @@ def test_a_second_session_cannot_open_the_database(tmp_path):
 def test_newer_database_is_not_modified(tmp_path):
     path = tmp_path / "todo.sqlite3"
     with closing(sqlite3.connect(path)) as connection, connection:
-        connection.execute("PRAGMA user_version = 3")
-    with pytest.raises(ValueError, match="version 3"):
+        connection.execute("PRAGMA user_version = 4")
+    with pytest.raises(ValueError, match="version 4"):
         Store(path)
     with closing(sqlite3.connect(path)) as connection:
-        assert connection.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+
+
+def test_a_version_2_database_keeps_its_days_and_gains_spans(tmp_path):
+    path = tmp_path / "todo.sqlite3"
+    day = planned(DAY)
+    with closing(Store(path)) as store:
+        store.save(day)
+    # as the previous version left it: days only
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("DROP TABLE spans")
+        connection.execute("PRAGMA user_version = 2")
+    span = Span(
+        "november",
+        datetime(2026, 11, 6, 10, 30),
+        datetime(2026, 12, 1),
+        planned(DAY).sections,
+    )
+    with closing(Store(path)) as store:
+        assert store.load(DAY) == day
+        assert store.spans() == ()
+        store.save(span)
+    with closing(Store(path)) as store:
+        assert store.spans() == (span,)
+        store.delete_span(span.id)
+        assert store.spans() == ()

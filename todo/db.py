@@ -1,37 +1,66 @@
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
-from .model import Day, Interval, Section, Task, empty_day
+from .model import Day, Interval, Section, Span, Task, empty_day
 
-VERSION = 2
+# 3 added spans; a version 2 database gains their table on opening
+VERSION = 3
+SPANS_TABLE = "CREATE TABLE spans (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
+
+
+def encode_sections(sections: tuple[Section, ...]) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": section.id,
+            "title": section.title,
+            "tasks": [
+                {
+                    "id": task.id,
+                    "title": task.title,
+                    "available": None
+                    if task.available is None
+                    else str(task.available),
+                    "earned": str(task.earned),
+                    "minutes": task.minutes,
+                }
+                for task in section.tasks
+            ],
+        }
+        for section in sections
+    ]
+
+
+def decode_sections(data: list[dict[str, Any]]) -> tuple[Section, ...]:
+    return tuple(
+        Section(
+            section["title"],
+            tuple(
+                Task(
+                    task["title"],
+                    None if task["available"] is None else Fraction(task["available"]),
+                    Fraction(task["earned"]),
+                    task["minutes"],
+                    # days stored earlier also carry "checked", the done
+                    # state unscored tasks no longer have; it is dropped
+                    id=task["id"],
+                )
+                for task in section["tasks"]
+            ),
+            section["id"],
+        )
+        for section in data
+    )
 
 
 def encode(day: Day) -> str:
     return json.dumps(
         {
             "intervals": [[interval.start, interval.end] for interval in day.intervals],
-            "sections": [
-                {
-                    "id": section.id,
-                    "title": section.title,
-                    "tasks": [
-                        {
-                            "id": task.id,
-                            "title": task.title,
-                            "available": None
-                            if task.available is None
-                            else str(task.available),
-                            "earned": str(task.earned),
-                            "minutes": task.minutes,
-                        }
-                        for task in section.tasks
-                    ],
-                }
-                for section in day.sections
-            ],
+            "sections": encode_sections(day.sections),
         },
         ensure_ascii=False,
     )
@@ -42,36 +71,40 @@ def decode(list_date: date, text: str) -> Day:
     return Day(
         list_date,
         tuple(Interval(start, end) for start, end in data["intervals"]),
-        tuple(
-            Section(
-                section["title"],
-                tuple(
-                    Task(
-                        task["title"],
-                        None
-                        if task["available"] is None
-                        else Fraction(task["available"]),
-                        Fraction(task["earned"]),
-                        task["minutes"],
-                        # days stored earlier also carry "checked", the done
-                        # state unscored tasks no longer have; it is dropped
-                        id=task["id"],
-                    )
-                    for task in section["tasks"]
-                ),
-                section["id"],
-            )
-            for section in data["sections"]
-        ),
+        decode_sections(data["sections"]),
+    )
+
+
+def encode_span(span: Span) -> str:
+    return json.dumps(
+        {
+            "title": span.title,
+            "start": span.start.isoformat(timespec="minutes"),
+            "end": span.end.isoformat(timespec="minutes"),
+            "sections": encode_sections(span.sections),
+        },
+        ensure_ascii=False,
+    )
+
+
+def decode_span(span_id: str, text: str) -> Span:
+    data = json.loads(text)
+    return Span(
+        data["title"],
+        datetime.fromisoformat(data["start"]),
+        datetime.fromisoformat(data["end"]),
+        decode_sections(data["sections"]),
+        span_id,
     )
 
 
 class Store:
-    """One JSON document per day, keyed by its ISO date.
+    """One JSON document per day, keyed by its ISO date, and one per span,
+    keyed by its id.
 
     The store holds the database exclusively until closed, so no other session
-    can change a day underneath this one. A blank day is never stored, so a
-    blank day and a missing one are the same."""
+    can change a list underneath this one. A blank day is never stored, so a
+    blank day and a missing one are the same; a span stays until deleted."""
 
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +127,9 @@ class Store:
                     self.connection.execute(
                         "CREATE TABLE days (date TEXT PRIMARY KEY, data TEXT NOT NULL)"
                     )
+                    self.connection.execute(SPANS_TABLE)
+                elif version == 2:
+                    self.connection.execute(SPANS_TABLE)
                 elif version != VERSION:
                     raise ValueError(
                         f"Unsupported database version {version}; expected {VERSION}."
@@ -120,14 +156,33 @@ class Store:
             )
         )
 
-    def save(self, day: Day) -> None:
+    def spans(self) -> tuple[Span, ...]:
+        """Every span, by start and then end; there are few enough to load
+        them all."""
+        spans = (
+            decode_span(span_id, data)
+            for span_id, data in self.connection.execute("SELECT id, data FROM spans")
+        )
+        return tuple(sorted(spans, key=lambda span: (span.start, span.end)))
+
+    def save(self, plan: Day | Span) -> None:
         with self.connection:
-            if day.blank:
-                self.connection.execute(
-                    "DELETE FROM days WHERE date = ?", (day.date.isoformat(),)
-                )
-            else:
-                self.connection.execute(
-                    "INSERT OR REPLACE INTO days VALUES (?, ?)",
-                    (day.date.isoformat(), encode(day)),
-                )
+            match plan:
+                case Day() if plan.blank:
+                    self.connection.execute(
+                        "DELETE FROM days WHERE date = ?", (plan.date.isoformat(),)
+                    )
+                case Day():
+                    self.connection.execute(
+                        "INSERT OR REPLACE INTO days VALUES (?, ?)",
+                        (plan.date.isoformat(), encode(plan)),
+                    )
+                case Span():
+                    self.connection.execute(
+                        "INSERT OR REPLACE INTO spans VALUES (?, ?)",
+                        (plan.id, encode_span(plan)),
+                    )
+
+    def delete_span(self, span_id: str) -> None:
+        with self.connection:
+            self.connection.execute("DELETE FROM spans WHERE id = ?", (span_id,))

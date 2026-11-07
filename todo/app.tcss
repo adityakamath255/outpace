@@ -3,8 +3,7 @@ Screen {
     color: ansi_default;
 }
 
-/* the arrows' padding stands in for the margin, so the glyph sits where the
-   date used to start */
+/* no margin: the arrows' padding is the line's left edge */
 #date-line {
     height: 1;
 }
@@ -23,6 +22,28 @@ Screen {
 
 #hidden {
     margin-left: 1;
+}
+
+#date-gap {
+    width: 1fr;
+}
+
+/* the mode on screen at full strength, the other dimmed */
+#days-mode, #lists-mode {
+    padding: 0 1;
+    text-style: dim;
+}
+
+#days-mode.mode-on, #lists-mode.mode-on {
+    text-style: bold;
+}
+
+#days-mode:hover, #lists-mode:hover {
+    background: ansi_black;
+}
+
+#mode-dot {
+    text-style: dim;
 }
 
 #body {
@@ -260,6 +281,53 @@ Toast {
 
 #schedule-dialog {
     width: 50;
+}
+
+#picker-dialog {
+    width: 80;
+}
+
+#no-lists {
+    height: auto;
+}
+
+#span-dialog {
+    width: 62;
+}
+
+.span-row {
+    height: 1;
+    margin-bottom: 1;
+}
+
+.span-row Label {
+    width: 5;
+    margin-right: 1;
+    text-style: dim;
+}
+
+.span-row #to-label {
+    width: auto;
+    margin: 0 1 0 1;
+}
+
+.span-row Input, .span-row Input:focus {
+    margin-right: 1;
+}
+
+#span-title, #span-title:focus {
+    width: 1fr;
+    margin-right: 0;
+}
+
+/* room for 2026-11-20 and the cursor; two classes, to outrank .dialog Input */
+.span-row .date-field, .span-row .date-field:focus {
+    width: 13;
+}
+
+/* room for 23:59 and the cursor */
+.span-row .time-field, .span-row .time-field:focus {
+    width: 8;
 }
 
 /* the time format reads as the title's second line */

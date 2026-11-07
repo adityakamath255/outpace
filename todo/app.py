@@ -3,7 +3,7 @@ import sqlite3
 from collections.abc import Callable
 from contextlib import closing
 from dataclasses import replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from fractions import Fraction
 from pathlib import Path
 from typing import Literal, NamedTuple
@@ -34,8 +34,10 @@ from .model import (
     Day,
     Interval,
     Section,
+    Span,
     Task,
     clock,
+    fresh_copy,
     interval_text,
     number,
     parse_clock,
@@ -46,7 +48,7 @@ from .model import (
     points,
     schedule,
     score,
-    seconds_into,
+    seconds_since,
     time_progress,
     work,
 )
@@ -63,8 +65,13 @@ LABEL_WIDTH = 7
 
 
 def duration(seconds: int) -> Text:
-    """Like 3h40m, with the unit letters dimmed so the digits stand out."""
-    parts = zip((seconds // 3600, seconds // 60 % 60, seconds % 60), "hms", strict=True)
+    """Like 3h40m or 24d13h30m, with the unit letters dimmed so the digits
+    stand out."""
+    parts = zip(
+        (seconds // 86400, seconds // 3600 % 24, seconds // 60 % 60, seconds % 60),
+        "dhms",
+        strict=True,
+    )
     text = Text()
     for value, unit in parts:
         if value:
@@ -99,7 +106,7 @@ class Column(NamedTuple):
     """A sortable column of the task list."""
 
     header: str
-    # cells, wide enough for the longest value it shows
+    # cells; a wider value is cut short with …
     width: int
     # None marks a task without the value; such tasks sort last
     value: Callable[[Task], Fraction | int | None]
@@ -194,9 +201,9 @@ def arrange(tasks: tuple[Task, ...], sort: Sort) -> tuple[Task, ...]:
 
 
 class View(NamedTuple):
-    """What the task pane shows of a day under a sort and the done filter."""
+    """What the task pane shows of a list under a sort and the done filter."""
 
-    day: Day
+    plan: Day | Span
     # as chosen, for the column names, even while sections are shown
     sort: Sort | None
     # each section with its tasks that the filter leaves, in stored order
@@ -214,9 +221,9 @@ class View(NamedTuple):
         return tuple(task for _, tasks in self.groups for task in tasks)
 
     def first_row(self) -> str:
-        """Where a freshly opened day starts: its first task, else its first rule."""
+        """Where a freshly opened list starts: its first task, else its first rule."""
         tasks = self.flat or self.shown()
-        return tasks[0].id if tasks else self.day.sections[0].id
+        return tasks[0].id if tasks else self.plan.sections[0].id
 
     def neighbours(self, section: Section) -> tuple[Task, ...]:
         """The tasks a deleted task's selection may pass to: any while sorted;
@@ -225,15 +232,15 @@ class View(NamedTuple):
         return self.flat or self.shown_in(section)
 
 
-def view(day: Day, sort: Sort | None, hide_done: bool) -> View:
+def view(plan: Day | Span, sort: Sort | None, hide_done: bool) -> View:
     groups = tuple(
         (s, tuple(t for t in s.tasks if not (hide_done and t.complete)))
-        for s in day.sections
+        for s in plan.sections
     )
     shown = tuple(task for _, tasks in groups for task in tasks)
     flat = arrange(shown, sort) if sort is not None and shown else None
-    hidden = sum(task.complete for task in day.tasks()) if hide_done else 0
-    return View(day, sort, groups, flat, hidden)
+    hidden = sum(task.complete for task in plan.tasks()) if hide_done else 0
+    return View(plan, sort, groups, flat, hidden)
 
 
 def next_sort(current: Sort | None, column: Column) -> Sort | None:
@@ -274,7 +281,7 @@ def section_label(section: Section) -> str:
 
 
 def section_share(section: Section, total: Fraction) -> str:
-    """The section's part of the day's points, or nothing when that says
+    """The section's part of the list's points, or nothing when that says
     nothing: no points, or all of them."""
     _, available = score(section.tasks)
     if not available or available == total:
@@ -369,27 +376,43 @@ def verdict(seconds: int | Fraction, good: str, bad: str) -> Text:
     return Text.assemble((word, color), " ", duration(abs(whole)))
 
 
-def schedule_rows(day: Day) -> Table:
-    if not day.intervals:
-        return labelled(("schedule", Text("none", style="dim")))
-    rows: list[tuple[str, Text]] = []
-    for index, interval in enumerate(day.intervals):
-        text = Text(interval_text(interval))
-        if interval.next_day:
-            text.append(" next day", style="dim")
-        rows.append(("schedule" if index == 0 else "", text))
-    return labelled(*rows)
+def moment(value: datetime) -> str:
+    return f"{value:%Y-%m-%d %H:%M}"
 
 
-def stats(day: Day, now: datetime, full_title: str | None) -> Group:
-    """The day's totals, time and work per point, and verdicts on the time left:
-    the stats pane below the schedule.
+def span_text(span: Span) -> str:
+    return f"{moment(span.start)} – {moment(span.end)}"
 
-    Time comes from the schedule and work from the task durations; unscored
-    tasks take time, so their durations count as work never done."""
-    tasks = tuple(day.tasks())
+
+def time_rows(plan: Day | Span) -> Table:
+    """The time a list counts: a day's schedule, or a span's start and end."""
+    match plan:
+        case Day(intervals=()):
+            return labelled(("schedule", Text("none", style="dim")))
+        case Day():
+            rows: list[tuple[str, Text]] = []
+            for index, interval in enumerate(plan.intervals):
+                text = Text(interval_text(interval))
+                if interval.next_day:
+                    text.append(" next day", style="dim")
+                rows.append(("schedule" if index == 0 else "", text))
+            return labelled(*rows)
+        case Span():
+            return labelled(
+                ("span", Text(moment(plan.start))), ("", Text(moment(plan.end)))
+            )
+
+
+def stats(plan: Day | Span, now: datetime, full_title: str | None) -> Group:
+    """The list's totals, time and work per point, and verdicts on the time
+    left: the stats pane below the time rows.
+
+    Time comes from a day's schedule or a span's whole length, and work from
+    the task durations; unscored tasks take time, so their durations count as
+    work never done."""
+    tasks = tuple(plan.tasks())
     earned, available = score(tasks)
-    elapsed, scheduled = time_progress(day.intervals, seconds_into(day.date, now))
+    elapsed, scheduled = time_progress(plan.intervals, seconds_since(plan.origin, now))
     worked, needed = work(tasks)
     timed_tasks = timed(tasks)
     timed_earned, timed_available = score(timed_tasks)
@@ -462,7 +485,8 @@ def stats(day: Day, now: datetime, full_title: str | None) -> Group:
             ("pace", verdict(ahead, "ahead", "behind") if ahead else Text("on pace"))
         )
     if scheduled and needed:
-        verdicts.append(("all day", verdict(scheduled - needed, "spare", "over")))
+        whole = "all day" if isinstance(plan, Day) else "whole list"
+        verdicts.append((whole, verdict(scheduled - needed, "spare", "over")))
         verdicts.append(
             (
                 "from now",
@@ -485,16 +509,25 @@ def stats(day: Day, now: datetime, full_title: str | None) -> Group:
     return Group(*spaced)
 
 
+def plan_key(plan: Day | Span) -> date | str:
+    """What names a list for undo and put: a day's date, or a span's id."""
+    match plan:
+        case Day():
+            return plan.date
+        case Span():
+            return plan.id
+
+
 class Deleted(NamedTuple):
     """The row x last removed, which p and P put back as a copy."""
 
-    date: date
+    source: date | str
     row: Task | Section
 
 
 class Change(NamedTuple):
-    # the day undoing returns to, or on a redo stack the day redoing does
-    restores: Day
+    # the list undoing returns to, or on a redo stack the list redoing does
+    restores: Day | Span
     description: str
     # the row to select afterwards: a task or section id
     subject: str | None
@@ -538,13 +571,14 @@ HELP = (
         ),
     ),
     (
-        "Days",
+        "Days and lists",
         (
-            ("[ ]", "previous or next day"),
+            ("tab", "switch between days and lists"),
+            ("[ ]", "previous or next day, or list"),
             ("t", "today"),
-            ("T", "open a date"),
-            ("c", "replace this list with another day's"),
-            ("@", "edit schedule"),
+            ("T", "open a date, or the lists"),
+            ("c", "replace this list with another's"),
+            ("@", "edit the schedule, or a list's title and time"),
         ),
     ),
     (
@@ -597,11 +631,14 @@ class TaskList(VimList):
     footer or the menu without acting on it; a right-click also asks for the
     row's menu."""
 
+    # here rather than on the app, where the screen's tab, which moves focus,
+    # would take it first; a priority binding would also take tab in dialogs
+    BINDINGS = [Binding("tab", "app.toggle_lists", "Days or lists", show=False)]
+
     class MenuRequested(Message):
-        def __init__(self, at: Offset):
+        def __init__(self, screen_offset: Offset):
             super().__init__()
-            # where the click landed, on the screen
-            self.at = at
+            self.screen_offset = screen_offset
 
     def on_click(self, event: events.Click) -> None:
         # skips OptionList's handler, which would select the row as ⏎ does
@@ -707,9 +744,10 @@ class TaskPane(Vertical):
         if view.flat is not None:
             options = [Option(task_row(task), id=task.id) for task in view.flat]
         else:
-            _, total = score(view.day.tasks())
+            _, total = score(view.plan.tasks())
             for section, tasks in view.groups:
-                # section and task ids are unique across both kinds (see Day)
+                # section and task ids are unique across both kinds (see
+                # check_sections)
                 options.append(Option(SectionRule(section, total), id=section.id))
                 options.extend(Option(task_row(t), id=t.id) for t in tasks)
                 subtotal = subtotal_row(section)
@@ -727,10 +765,12 @@ class TaskPane(Vertical):
             # the next one
             widget.highlighted = widget.selectable_near(old_index or 0, -1)
         empty = self.query_one("#empty", Static)
-        if any(view.day.tasks()):
+        if any(view.plan.tasks()):
             empty.update("all done · f shows them")
         else:
-            empty.update("o  add tasks\nc  copy another day's list")
+            # a day's copy brings its schedule too; a span's, only tasks
+            copied = "day's list" if isinstance(view.plan, Day) else "list's tasks"
+            empty.update(f"o  add tasks\nc  copy another {copied}")
         empty.display = not view.shown()
         self.query_one("#columns", Static).update(header_row(view.sort))
 
@@ -1153,6 +1193,245 @@ class HelpScreen(ModalScreen):
             yield bottom_row("", ("close", "screen.dismiss"))
 
 
+def read_moment(name: str, day_text: str, time_text: str, *, end: bool) -> datetime:
+    """A start or end from its date and time fields, naming the field on
+    failure. A blank time is the date's start, or for an end its close, so a
+    span between two dates covers both whole."""
+    try:
+        day = parse_date(day_text)
+    except ValueError as error:
+        raise ValueError(f"{name} date: {error}") from None
+    midnight = datetime.combine(day, time())
+    if not time_text.strip():
+        return midnight + timedelta(days=1) if end else midnight
+    try:
+        minutes = parse_clock(time_text)
+    except ValueError as error:
+        raise ValueError(f"{name} time: {error}") from None
+    return midnight + timedelta(minutes=minutes)
+
+
+class SpanEditor(Form):
+    """Edits a span's title, start and end, or gives them for a new span when
+    there is none; on_submit takes them, raising a RECOVERABLE error to keep
+    the draft."""
+
+    def __init__(
+        self,
+        span: Span | None,
+        on_submit: Callable[[str, datetime, datetime], object],
+    ):
+        super().__init__()
+        self.span = span
+        self.on_submit = on_submit
+
+    def compose(self) -> ComposeResult:
+        span = self.span
+
+        def moment_fields(value: datetime | None, name: str) -> list[Input]:
+            day = Input(
+                "" if value is None else value.date().isoformat(),
+                restrict=r"[0-9-]*",
+                max_length=10,
+                compact=True,
+                id=f"{name}-date",
+                classes="date-field",
+            )
+            moment = time_field("" if value is None else f"{value:%H:%M}", "time-field")
+            moment.id = f"{name}-time"
+            return [day, moment]
+
+        with Vertical(classes="dialog", id="span-dialog"):
+            yield Label(
+                "New list" if span is None else "Edit list", classes="dialog-title"
+            )
+            yield Static(
+                "dates like 2026-11-20; times like 07:30, or blank",
+                id="time-format",
+                classes="muted",
+                markup=False,
+            )
+            with Horizontal(classes="span-row"):
+                yield Label("title")
+                yield Input(
+                    "" if span is None else span.title,
+                    id="span-title",
+                    compact=True,
+                    select_on_focus=False,
+                )
+            with Horizontal(classes="span-row"):
+                yield Label("from")
+                yield from moment_fields(None if span is None else span.start, "from")
+                yield Label("to", id="to-label")
+                yield from moment_fields(None if span is None else span.end, "to")
+            yield Static("", id="error", markup=False)
+            yield save_and_cancel("", "add" if span is None else "save")
+
+    def read(self) -> tuple[datetime, datetime]:
+        def value(selector: str) -> str:
+            return self.query_one(selector, Input).value
+
+        start = read_moment("From", value("#from-date"), value("#from-time"), end=False)
+        end = read_moment("To", value("#to-date"), value("#to-time"), end=True)
+        return start, end
+
+    def on_mount(self) -> None:
+        self.update_length()
+
+    @on(Input.Changed)
+    def update_length(self) -> None:
+        """How long the span would be, while its fields can be read."""
+        try:
+            start, end = self.read()
+        except ValueError:
+            length = Text()
+        else:
+            length = (
+                duration(int((end - start).total_seconds())) if end > start else Text()
+            )
+        self.query_one("#hint", Static).update(length)
+
+    def save(self) -> None:
+        start, end = self.read()
+        self.on_submit(self.query_one("#span-title", Input).value, start, end)
+        self.dismiss()
+
+
+def span_status(span: Span, now: datetime) -> str:
+    if now < span.start:
+        return "later"
+    return "now" if now < span.end else "ended"
+
+
+def picker_lines(spans: tuple[Span, ...], now: datetime) -> list[Text]:
+    """A row per span: title, start and end, how much is done, and whether it
+    covers now; each column filled, with - for a missing value."""
+    titles = [span.title or "-" for span in spans]
+    width = max((Text(title).cell_len for title in titles), default=0)
+    lines = []
+    for span, title in zip(spans, titles, strict=True):
+        earned, available = score(span.tasks())
+        done = f"{percentage(earned / available)}%" if available else "-"
+        line = Text(title)
+        line.pad_right(width - line.cell_len)
+        line.append(f"  {span_text(span)}  {done:>7}  ")
+        line.append(f"{span_status(span, now):<5}", style="dim")
+        lines.append(line)
+    return lines
+
+
+class ListManager(NamedTuple):
+    """What the picker asks the app to do with lists; delete and restore give
+    the spans left, restore None when there is nothing to bring back."""
+
+    new: Callable[[], object]
+    delete: Callable[[Span], tuple[Span, ...]]
+    restore: Callable[[], tuple[Span, ...] | None]
+
+
+class ListPicker(ModalScreen):
+    """The span lists, latest to start first. Choosing one dismisses and passes
+    it to on_choose; with a manager, the picker also adds lists, and deletes
+    and restores them in place."""
+
+    BINDINGS = [
+        ("escape", "dismiss", "Close"),
+        Binding("o", "new", "New list", show=False),
+        Binding("x", "delete", "Delete list", show=False),
+        Binding("u", "restore", "Restore list", show=False),
+    ]
+
+    def __init__(
+        self,
+        spans: tuple[Span, ...],
+        on_choose: Callable[[Span], object],
+        manager: ListManager | None = None,
+        selected: str | None = None,
+    ):
+        super().__init__()
+        self.spans = spans
+        self.on_choose = on_choose
+        self.manager = manager
+        self.selected = selected
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="dialog", id="picker-dialog"):
+            if self.manager is None:
+                yield Label(
+                    "Replace this list's tasks with a copy of", classes="dialog-title"
+                )
+                yield VimList(id="picker")
+                yield Static("", id="no-lists", classes="muted")
+                yield bottom_row("", ("cancel", "screen.dismiss"))
+            else:
+                yield Label("Lists", classes="dialog-title")
+                yield VimList(id="picker")
+                yield Static("no lists yet", id="no-lists", classes="muted")
+                yield bottom_row(
+                    "",
+                    ("new", "screen.new"),
+                    ("delete", "screen.delete"),
+                    ("restore", "screen.restore"),
+                    ("close", "screen.dismiss"),
+                )
+
+    def on_mount(self) -> None:
+        self.show(self.spans, self.selected)
+
+    def show(self, spans: tuple[Span, ...], selected: str | None) -> None:
+        """Draws spans latest first, selecting the span named, else the row
+        where the cursor was."""
+        picker = self.query_one("#picker", VimList)
+        old_index = picker.highlighted or 0
+        self.spans = tuple(reversed(spans))
+        picker.set_options(picker_lines(self.spans, datetime.now()))
+        ids = [span.id for span in self.spans]
+        if self.spans:
+            picker.highlighted = (
+                ids.index(selected)
+                if selected in ids
+                else min(old_index, len(self.spans) - 1)
+            )
+        picker.display = bool(self.spans)
+        self.query_one("#no-lists").display = not self.spans
+        # hiding the list with nothing in it took its focus
+        if self.spans:
+            picker.focus()
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
+        return self.manager is not None or action not in ("new", "delete", "restore")
+
+    @on(OptionList.OptionSelected)
+    def choose(self, event: OptionList.OptionSelected) -> None:
+        self.dismiss()
+        self.on_choose(self.spans[event.option_index])
+
+    def action_new(self) -> None:
+        if self.manager is not None:
+            self.dismiss()
+            self.manager.new()
+
+    def action_delete(self) -> None:
+        index = self.query_one("#picker", VimList).highlighted
+        if self.manager is None or index is None:
+            return
+        span = self.spans[index]
+        self.show(self.manager.delete(span), None)
+        name = span.title or span_text(span)
+        self.app.notify(
+            f"Deleted {name}; restore brings it back.", timeout=4, markup=False
+        )
+
+    def action_restore(self) -> None:
+        if self.manager is None:
+            return
+        restored = self.manager.restore()
+        if restored is None:
+            self.app.notify("No deleted list to restore.", timeout=2)
+            return
+        self.show(restored, None)
+
+
 class TodoApp(App):
     CSS_PATH = "app.tcss"
     TITLE = "todo"
@@ -1171,18 +1450,20 @@ class TodoApp(App):
         Binding("P", "put(False)", "Put above", show=False),
         Binding("u", "undo", "Undo"),
         Binding("ctrl+r", "redo", "Redo", show=False),
-        Binding("@", "schedule", "Schedule"),
+        # one for each mode, so the footer names what @ edits there
+        Binding("@", "edit_time('days')", "Schedule"),
+        Binding("@", "edit_time('lists')", "Span"),
         Binding("question_mark", "help", "Keys"),
-        Binding("c", "reuse", "Reuse", show=False),
+        Binding("c", "copy", "Copy", show=False),
         Binding("s", "sort", "Sort", show=False),
         Binding("f", "toggle_done", "Hide done", show=False),
         Binding("J", "move(1)", "Move down", show=False),
         Binding("K", "move(-1)", "Move up", show=False),
         Binding("}", "jump_section(1)", "Next section", show=False),
         Binding("{", "jump_section(-1)", "Previous section", show=False),
-        Binding("T", "choose_day", "Choose day", show=False),
-        Binding("[", "shift_day(-1)", "Previous day", show=False),
-        Binding("]", "shift_day(1)", "Next day", show=False),
+        Binding("T", "choose", "Choose", show=False),
+        Binding("[", "shift(-1)", "Previous", show=False),
+        Binding("]", "shift(1)", "Next", show=False),
         Binding("t", "today", "Today", show=False),
         # hidden for room at 80 columns; ? lists it
         Binding("q", "quit", "Quit", show=False),
@@ -1191,15 +1472,43 @@ class TodoApp(App):
     def __init__(self, store: Store, list_date: date):
         super().__init__(ansi_color=True)
         self.store = store
-        # undo and redo stacks per date, kept while the app runs; the store's
-        # lock means nothing else changes a day behind them
-        self.histories: dict[date, list[Change]] = {}
-        self.redos: dict[date, list[Change]] = {}
+        # undo and redo stacks per list, kept while the app runs; the store's
+        # lock means nothing else changes a list behind them
+        self.histories: dict[date | str, list[Change]] = {}
+        self.redos: dict[date | str, list[Change]] = {}
         self.deleted: Deleted | None = None
-        # views that apply to every day until quit, never stored
+        # spans deleted from the picker, newest last, for it to restore
+        self.deleted_spans: list[Span] = []
+        # views that apply to every list until quit, never stored
         self.sort: Sort | None = None
         self.hide_done = False
+        # the day days mode shows, and the span lists mode shows; lists mode
+        # is on only while there is a span to show
         self.day = store.load(list_date)
+        self.span: Span | None = None
+        self.lists = False
+
+    @property
+    def plan(self) -> Day | Span:
+        """The list on screen."""
+        if not self.lists:
+            return self.day
+        if self.span is None:
+            raise RuntimeError("lists mode always has a span")
+        return self.span
+
+    def set_plan(self, plan: Day | Span) -> None:
+        match plan:
+            case Day():
+                self.day = plan
+            case Span():
+                self.span = plan
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
+        # edit_time's parameter only picks which footer label shows
+        if action == "edit_time" and parameters:
+            return parameters[0] == ("lists" if self.lists else "days")
+        return True
 
     def on_notify(self) -> None:
         # textual has no public limit on toasts, and this handler runs before
@@ -1212,15 +1521,19 @@ class TodoApp(App):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="date-line"):
-            yield LineButton("‹", "app.shift_day(-1)", classes="link")
+            yield LineButton("‹", "app.shift(-1)", classes="link")
             yield Static("", id="date")
-            yield LineButton("›", "app.shift_day(1)", classes="link")
+            yield LineButton("›", "app.shift(1)", classes="link")
             yield LineButton("jump to today", "app.today", id="today", classes="button")
             yield LineButton("", "app.toggle_done", id="hidden", classes="link")
+            yield Static("", id="date-gap")
+            yield LineButton("days", "app.show_mode('days')", id="days-mode")
+            yield Static("·", id="mode-dot")
+            yield LineButton("lists", "app.show_mode('lists')", id="lists-mode")
         with Horizontal(id="body"):
             yield TaskPane(id="task-pane")
             with Vertical(id="stats"):
-                yield LineButton("", "app.schedule", id="schedule")
+                yield LineButton("", "app.edit_time", id="schedule")
                 yield Static("", id="totals")
         yield Footer(compact=True)
 
@@ -1230,7 +1543,13 @@ class TodoApp(App):
         self.set_interval(1, self.refresh_stats)
         self.query_one("#tasks", VimList).focus()
 
-    def action_choose_day(self) -> None:
+    def action_choose(self) -> None:
+        if self.lists:
+            self.open_picker()
+        else:
+            self.choose_day()
+
+    def choose_day(self) -> None:
         self.push_screen(
             Prompt(
                 "Open a day's list",
@@ -1241,14 +1560,29 @@ class TodoApp(App):
             )
         )
 
-    def action_shift_day(self, offset: int) -> None:
+    def action_shift(self, offset: int) -> None:
+        """The previous or next day, or span by start; there is none past the
+        first or last span."""
+        if self.lists:
+            spans = self.store.spans()
+            index = [s.id for s in spans].index(self.plan_id()) + offset
+            if 0 <= index < len(spans):
+                self.open_span(spans[index])
+            return
         try:
             target = self.day.date + timedelta(days=offset)
         except OverflowError:
             return
         self.navigate_day(target)
 
+    def plan_id(self) -> str:
+        if self.span is None:
+            raise RuntimeError("lists mode always has a span")
+        return self.span.id
+
     def action_today(self) -> None:
+        if self.lists:
+            self.action_show_mode("days")
         self.navigate_day(date.today())
 
     def navigate_day(self, target: date) -> None:
@@ -1268,10 +1602,10 @@ class TodoApp(App):
     def selected(self) -> tuple[Section, Task | None]:
         """The highlighted row: a task with its section, or a section's rule.
 
-        A day always has a section and redraw always highlights a row, so a
+        A list always has a section and redraw always highlights a row, so a
         missing row is a bug rather than a state to handle."""
         row_id = self.query_one(TaskPane).selected_id
-        for section in self.day.sections:
+        for section in self.plan.sections:
             if row_id == section.id:
                 return section, None
             for task in section.tasks:
@@ -1280,7 +1614,7 @@ class TodoApp(App):
         raise RuntimeError("the task list has no highlighted row")
 
     def current_view(self) -> View:
-        return view(self.day, self.sort, self.hide_done)
+        return view(self.plan, self.sort, self.hide_done)
 
     def refuse_while_sorted(self, action: str) -> bool:
         """Says so when the sorted list hides the order or sections an action
@@ -1296,11 +1630,22 @@ class TodoApp(App):
     def redraw(self, selection: str | None = None) -> None:
         current = self.current_view()
         self.query_one(TaskPane).show(current, selection)
-        self.query_one("#date", Static).update(
-            Text(f"{self.day.date:%a} {self.day.date.isoformat()}", style="bold")
+        plan = self.plan
+        match plan:
+            case Day():
+                heading = f"{plan.date:%a} {plan.date.isoformat()}"
+            case Span():
+                heading = span_text(plan)
+                if plan.title:
+                    heading = f"{plan.title} · {heading}"
+        self.query_one("#date", Static).update(Text(heading, style="bold"))
+        self.query_one("#schedule", Static).update(time_rows(plan))
+        self.query_one("#today").display = (
+            isinstance(plan, Day) and plan.date != date.today()
         )
-        self.query_one("#schedule", Static).update(schedule_rows(self.day))
-        self.query_one("#today").display = self.day.date != date.today()
+        self.query_one("#days-mode").set_class(not self.lists, "mode-on")
+        self.query_one("#lists-mode").set_class(self.lists, "mode-on")
+        self.refresh_bindings()
         hidden = self.query_one("#hidden", LineButton)
         hidden.display = self.hide_done
         hidden.update(
@@ -1324,7 +1669,7 @@ class TodoApp(App):
             if Text(task.title).cell_len > width:
                 full_title = task.title
         self.query_one("#totals", Static).update(
-            stats(self.day, datetime.now(), full_title)
+            stats(self.plan, datetime.now(), full_title)
         )
 
     @on(OptionList.OptionHighlighted, "#tasks")
@@ -1334,7 +1679,7 @@ class TodoApp(App):
     @on(TaskList.MenuRequested)
     def open_row_menu(self, event: TaskList.MenuRequested) -> None:
         self.push_screen(
-            RowMenu((self.row_actions(), self.day_actions()), event.at),
+            RowMenu((self.row_actions(), self.day_actions()), event.screen_offset),
             self.run_chosen,
         )
 
@@ -1384,9 +1729,12 @@ class TodoApp(App):
 
     def day_actions(self) -> tuple[MenuItem, ...]:
         """The keys with no place on the date line or in the footer."""
+        kind = "list" if self.lists else "day"
         return (
-            MenuItem("T", "open a date", self.action_choose_day),
-            MenuItem("c", "copy a day", self.action_reuse),
+            MenuItem(
+                "T", "open a list" if self.lists else "open a date", self.action_choose
+            ),
+            MenuItem("c", f"copy a {kind}", self.action_copy),
             MenuItem(
                 "f",
                 "show done" if self.hide_done else "hide done",
@@ -1408,36 +1756,36 @@ class TodoApp(App):
 
     def save_change(
         self,
-        day: Day,
+        plan: Day | Span,
         description: str,
         subject: str | None = None,
         *,
         select: str | None = None,
     ) -> bool:
-        """Save a change about the subject row, which is selected after the
-        change unless select names another row, and again after undoing.
-        Returns whether anything changed."""
-        if day == self.day:
+        """Save a change to the open list about the subject row, which is
+        selected after the change unless select names another row, and again
+        after undoing. Returns whether anything changed."""
+        before = self.plan
+        if plan == before:
             return False
-        self.store.save(day)
-        self.histories.setdefault(day.date, []).append(
-            Change(self.day, description, subject)
-        )
-        self.redos.pop(day.date, None)
-        self.day = day
+        self.store.save(plan)
+        key = plan_key(plan)
+        self.histories.setdefault(key, []).append(Change(before, description, subject))
+        self.redos.pop(key, None)
+        self.set_plan(plan)
         self.redraw(select or subject)
         return True
 
     def save_or_notify(
         self,
-        day: Day,
+        plan: Day | Span,
         description: str,
         subject: str | None = None,
         *,
         select: str | None = None,
     ) -> bool:
         try:
-            return self.save_change(day, description, subject, select=select)
+            return self.save_change(plan, description, subject, select=select)
         except RECOVERABLE as error:
             self.notify(str(error), title="Could not save", severity="error", timeout=8)
             return False
@@ -1458,7 +1806,7 @@ class TodoApp(App):
         def add(task: Task) -> None:
             nonlocal index
             self.save_change(
-                self.day.insert_task(task, section.id, index),
+                self.plan.insert_task(task, section.id, index),
                 f"added {task.title}",
                 task.id,
             )
@@ -1472,19 +1820,25 @@ class TodoApp(App):
     def action_new_section(self) -> None:
         if self.refuse_while_sorted("add sections"):
             return
-        index = self.day.sections.index(self.selected()[0]) + 1
+        index = self.plan.sections.index(self.selected()[0]) + 1
 
         def create(title: str) -> None:
             section = Section(title)
             self.save_change(
-                self.day.insert_section(section, index),
+                self.plan.insert_section(section, index),
                 f"added {section_label(section)}",
                 section.id,
             )
 
         self.push_screen(Prompt("New section", "", "add", "blank for untitled", create))
 
-    def action_reuse(self) -> None:
+    def action_copy(self) -> None:
+        if self.lists:
+            self.open_picker(copying=True)
+        else:
+            self.copy_day()
+
+    def copy_day(self) -> None:
         try:
             sources = tuple(d for d in self.store.list_dates() if d != self.day.date)
         except RECOVERABLE as error:
@@ -1522,7 +1876,7 @@ class TodoApp(App):
                     task,
                     "Edit task",
                     lambda edited: self.save_change(
-                        self.day.replace_task(edited),
+                        self.plan.replace_task(edited),
                         f"edited {edited.title}",
                         edited.id,
                     ),
@@ -1531,7 +1885,7 @@ class TodoApp(App):
             return
 
         def rename(value: str) -> None:
-            day = self.day.rename_section(section.id, value)
+            day = self.plan.rename_section(section.id, value)
             renamed = next(s for s in day.sections if s.id == section.id)
             self.save_change(
                 day,
@@ -1557,7 +1911,7 @@ class TodoApp(App):
         def save(value: str) -> None:
             after = replace(task, earned=points(value))
             self.save_change(
-                self.day.replace_task(after), progress_change(task, after), task.id
+                self.plan.replace_task(after), progress_change(task, after), task.id
             )
 
         self.push_screen(
@@ -1570,15 +1924,113 @@ class TodoApp(App):
             )
         )
 
-    def action_schedule(self) -> None:
+    def action_edit_time(self, mode: str = "") -> None:
+        """A day's schedule, or a span's title and time; mode is for the
+        footer, which check_action reads."""
+        match self.plan:
+            case Day() as day:
+                self.push_screen(
+                    ScheduleEditor(
+                        day.intervals,
+                        lambda intervals: self.save_change(
+                            replace(day, intervals=intervals), "changed the schedule"
+                        ),
+                    )
+                )
+            case Span() as span:
+                self.push_screen(
+                    SpanEditor(
+                        span,
+                        lambda title, start, end: self.save_change(
+                            replace(span, title=title, start=start, end=end),
+                            "changed the list's title and time",
+                        ),
+                    )
+                )
+
+    def action_toggle_lists(self) -> None:
+        self.action_show_mode("days" if self.lists else "lists")
+
+    def action_show_mode(self, mode: str) -> None:
+        """Days, or the span last open; with none open yet, the latest to start
+        of those covering now, else the latest to start; with no spans, a new
+        one."""
+        if mode == "days":
+            self.lists = False
+            self.redraw(self.current_view().first_row())
+            return
+        if self.lists:
+            return
+        if self.span is not None:
+            self.open_span(self.span)
+            return
+        spans = self.store.spans()
+        if not spans:
+            self.new_list()
+            return
+        now = datetime.now()
+        current = [s for s in spans if s.start <= now < s.end]
+        self.open_span((current or list(spans))[-1])
+
+    def open_span(self, span: Span) -> None:
+        self.span = span
+        self.lists = True
+        self.redraw(self.current_view().first_row())
+
+    def new_list(self) -> None:
+        def create(title: str, start: datetime, end: datetime) -> None:
+            span = Span(title, start, end, (Section(""),))
+            self.store.save(span)
+            self.open_span(span)
+
+        self.push_screen(SpanEditor(None, create))
+
+    def open_picker(self, *, copying: bool = False) -> None:
+        if copying:
+            open_id = self.plan_id()
+
+            def copy(source: Span) -> None:
+                name = source.title or span_text(source)
+                self.save_change(
+                    self.plan.with_sections(fresh_copy(source.sections)),
+                    f"replaced the tasks with {name}'s",
+                )
+
+            sources = tuple(s for s in self.store.spans() if s.id != open_id)
+            if not sources:
+                self.notify("No other lists yet.")
+                return
+            self.push_screen(ListPicker(sources, copy))
+            return
+        manager = ListManager(self.new_list, self.delete_span, self.restore_span)
+        selected = self.span.id if self.span is not None else None
         self.push_screen(
-            ScheduleEditor(
-                self.day.intervals,
-                lambda intervals: self.save_change(
-                    replace(self.day, intervals=intervals), "changed the schedule"
-                ),
-            )
+            ListPicker(self.store.spans(), self.open_span, manager, selected)
         )
+
+    def delete_span(self, span: Span) -> tuple[Span, ...]:
+        """Deletes span for the picker, which restore_span can bring back, and
+        gives the spans left. The open span passes to the next by start, or
+        the previous; with none left, days show."""
+        spans = self.store.spans()
+        index = [s.id for s in spans].index(span.id)
+        self.store.delete_span(span.id)
+        self.deleted_spans.append(span)
+        left = spans[:index] + spans[index + 1 :]
+        if self.span is not None and self.span.id == span.id:
+            neighbours = left[index : index + 1] or left[index - 1 : index]
+            self.span = neighbours[0] if neighbours else None
+            self.lists = self.lists and self.span is not None
+            self.redraw(self.current_view().first_row())
+        return left
+
+    def restore_span(self) -> tuple[Span, ...] | None:
+        """Brings back the span deleted last, giving all the spans; None when
+        nothing was deleted."""
+        if not self.deleted_spans:
+            return None
+        self.store.save(self.deleted_spans.pop())
+        return self.store.spans()
 
     def action_complete(self) -> None:
         self.change_progress(Task.toggle)
@@ -1596,7 +2048,7 @@ class TodoApp(App):
             self.notify(str(error), timeout=4)
             return
         self.save_or_notify(
-            self.day.replace_task(after), progress_change(task, after), after.id
+            self.plan.replace_task(after), progress_change(task, after), after.id
         )
 
     def action_delete(self) -> None:
@@ -1606,23 +2058,23 @@ class TodoApp(App):
             index = tasks.index(task)
             neighbours = tasks[index + 1 : index + 2] or tasks[index - 1 : index]
             if self.save_or_notify(
-                self.day.remove_task(task.id),
+                self.plan.remove_task(task.id),
                 f"deleted {task.title}",
                 task.id,
                 select=neighbours[0].id if neighbours else section.id,
             ):
-                self.deleted = Deleted(self.day.date, task)
+                self.deleted = Deleted(plan_key(self.plan), task)
             return
         count = len(section.tasks)
         tasks = f" and its {count} task{'s' if count != 1 else ''}" if count else ""
-        removed = self.day.remove_section(section.id)
+        removed = self.plan.remove_section(section.id)
         verb = (
-            "cleared" if len(removed.sections) == len(self.day.sections) else "deleted"
+            "cleared" if len(removed.sections) == len(self.plan.sections) else "deleted"
         )
         if self.save_or_notify(
             removed, f"{verb} {section_label(section)}{tasks}", section.id
         ):
-            self.deleted = Deleted(self.day.date, section)
+            self.deleted = Deleted(plan_key(self.plan), section)
 
     def action_put(self, below: bool) -> None:
         if self.refuse_while_sorted("put rows back"):
@@ -1630,16 +2082,16 @@ class TodoApp(App):
         if self.deleted is None:
             self.notify("Nothing deleted to put.", timeout=2)
             return
-        # progress belongs to the day it was made on
-        keep_progress = self.deleted.date == self.day.date
+        # progress belongs to the list it was made on
+        keep_progress = self.deleted.source == plan_key(self.plan)
         copied = self.deleted.row.duplicate(keep_progress=keep_progress)
         if isinstance(copied, Task):
             section, index = self.insertion_point(below)
-            day = self.day.insert_task(copied, section.id, index)
+            day = self.plan.insert_task(copied, section.id, index)
             label = copied.title
         else:
-            index = self.day.sections.index(self.selected()[0]) + below
-            day = self.day.insert_section(copied, index)
+            index = self.plan.sections.index(self.selected()[0]) + below
+            day = self.plan.insert_section(copied, index)
             label = section_label(copied)
         self.save_or_notify(day, f"put {label}", copied.id)
 
@@ -1655,13 +2107,13 @@ class TodoApp(App):
             )
         elif task is not None:
             self.save_or_notify(
-                self.day.move_task(task.id, offset),
+                self.plan.move_task(task.id, offset),
                 f"moved {task.title} {direction}",
                 task.id,
             )
         else:
             self.save_or_notify(
-                self.day.move_section(section.id, offset),
+                self.plan.move_section(section.id, offset),
                 f"moved {section_label(section)} {direction}",
                 section.id,
             )
@@ -1673,7 +2125,7 @@ class TodoApp(App):
         if self.refuse_while_sorted("jump between sections"):
             return
         section, task = self.selected()
-        sections = self.day.sections
+        sections = self.plan.sections
         index = sections.index(section)
         if offset < 0:
             target = section.id if task else sections[max(index - 1, 0)].id
@@ -1714,13 +2166,14 @@ class TodoApp(App):
 
     def restore(
         self,
-        source: dict[date, list[Change]],
-        target: dict[date, list[Change]],
+        source: dict[date | str, list[Change]],
+        target: dict[date | str, list[Change]],
         verb: str,
         past: str,
     ) -> None:
-        """Return to the day on top of source, recording the way back on target."""
-        stack = source.get(self.day.date)
+        """Return to the list on top of source, recording the way back on target."""
+        key = plan_key(self.plan)
+        stack = source.get(key)
         if not stack:
             self.notify(f"Nothing to {verb}.", timeout=2)
             return
@@ -1733,8 +2186,8 @@ class TodoApp(App):
             )
             return
         stack.pop()
-        target.setdefault(self.day.date, []).append(change._replace(restores=self.day))
-        self.day = change.restores
+        target.setdefault(key, []).append(change._replace(restores=self.plan))
+        self.set_plan(change.restores)
         self.redraw(change.subject)
         self.notify(f"{past}: {change.description}", timeout=4, markup=False)
 

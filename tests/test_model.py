@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from fractions import Fraction
 
 import pytest
@@ -8,6 +8,7 @@ from todo.model import (
     Day,
     Interval,
     Section,
+    Span,
     Task,
     empty_day,
     number,
@@ -18,6 +19,7 @@ from todo.model import (
     points,
     schedule,
     score,
+    seconds_since,
     time_progress,
 )
 
@@ -205,6 +207,22 @@ def test_day_accepts_touching_intervals_and_rejects_overlap_or_over_a_day():
     assert replace(day, intervals=(Interval(0, 24 * 60),)).intervals
     with pytest.raises(ValueError, match="24 hours"):
         replace(day, intervals=(first, Interval(24 * 60, 48 * 60)))
+
+
+def test_a_span_counts_all_its_time_and_must_end_after_it_starts():
+    start = datetime(2026, 11, 6, 10, 30)
+    span = Span("november", start, datetime(2026, 12, 1), (Section(""),))
+    now = datetime(2026, 11, 7, 10, 30)
+    total = (24 * 24 + 13) * HOUR + 30 * 60
+    assert time_progress(span.intervals, seconds_since(span.origin, now)) == (
+        24 * HOUR,
+        total,
+    )
+    with pytest.raises(ValueError, match="end after it starts"):
+        replace(span, end=start)
+    # the store keeps minutes, so seconds would not survive a save
+    with pytest.raises(ValueError, match="to the minute"):
+        replace(span, end=datetime(2026, 12, 1, 0, 0, 30))
 
 
 def test_report_matches_the_original_calculations():

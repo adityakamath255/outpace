@@ -3,7 +3,7 @@ import sqlite3
 import sys
 from contextlib import closing
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from io import StringIO
 
 import pytest
@@ -15,23 +15,26 @@ from todo.app import (
     COLUMNS,
     PANE_WIDTH,
     LineButton,
+    ListPicker,
     RowMenu,
     ScheduleEditor,
     SectionRule,
     Sort,
     TodoApp,
+    VimList,
     arrange,
     duration,
     main,
-    schedule_rows,
     stats,
     subtotal_row,
+    time_rows,
 )
 from todo.db import Store
 from todo.model import (
     Day,
     Interval,
     Section,
+    Span,
     Task,
     empty_day,
     parse_clock,
@@ -60,7 +63,7 @@ def pane_rows(day, now):
     its cells separated by single spaces."""
     output = StringIO()
     console = Console(file=output, width=PANE_WIDTH)
-    console.print(schedule_rows(day))
+    console.print(time_rows(day))
     console.print(stats(day, now, None))
     return [" ".join(line.split()) for line in output.getvalue().splitlines()]
 
@@ -334,10 +337,10 @@ def test_plus_and_minus_step_points_and_undo_names_the_change(app, monkeypatch):
 
 
 def test_help_lists_every_key_binding(app):
-    from todo.app import HELP, VimList
+    from todo.app import HELP, TaskList
 
     documented = {key for _, rows in HELP for keys, _ in rows for key in keys.split()}
-    bindings = [*TodoApp.BINDINGS, *VimList.BINDINGS]
+    bindings = [*TodoApp.BINDINGS, *VimList.BINDINGS, *TaskList.BINDINGS]
     displays = {
         app.get_key_display(binding.with_key(key))
         for binding in bindings
@@ -1047,3 +1050,99 @@ def test_f_hides_done_tasks_in_both_views_until_pressed_again(app):
             assert not app.query_one("#hidden").display
 
     asyncio.run(filter_done())
+
+
+def week(title="week", start=datetime(2026, 11, 2), earned="0"):
+    task = Task("Ship", points("4"), points(earned))
+    return Span(title, start, start + timedelta(days=7), (Section("", (task,)),))
+
+
+def test_days_and_lists_keep_their_own_list_history_and_progress(app):
+    span = week()
+    app.store.save(span)
+    day = app.day
+
+    async def switch():
+        async with app.run_test(size=(120, 35)) as pilot:
+            # x keeps the day's task to put, progress and all
+            await pilot.press("x")
+            await pilot.press("tab")
+            assert app.lists and app.plan == span
+            await pilot.press("plus")
+            assert app.store.spans()[0].sections[0].tasks[0].earned == 1
+            # progress belongs to the list it was made on
+            await pilot.press("p")
+            put = app.plan.sections[0].tasks[1]
+            assert put.title == "Practice" and put.earned == 0
+            await pilot.press("u", "u")
+            assert app.store.spans() == (span,)
+            await pilot.press("u")
+            assert app.plan == span
+            # back to days, whose deletion is still its own to undo
+            await pilot.press("tab")
+            assert not app.lists
+            await pilot.press("u")
+            assert app.day == day
+            await pilot.press("tab")
+            assert app.plan == span
+
+    asyncio.run(switch())
+
+
+def test_a_new_list_takes_whole_dates_and_at_edits_its_time(app):
+    def fill(**values):
+        for selector, value in values.items():
+            app.screen.query_one(f"#{selector}", Input).value = value
+
+    async def create():
+        async with app.run_test(size=(120, 35)) as pilot:
+            # with no lists yet, lists mode starts with a new one
+            await pilot.press("tab")
+            fill(**{"span-title": "november", "from-date": "2026-11-06"})
+            fill(**{"to-date": "2026-11-31"})
+            await pilot.press("enter")
+            assert "To date" in str(app.screen.query_one("#error", Static).content)
+            # a blank time takes the whole date
+            fill(**{"to-date": "2026-11-30"})
+            await pilot.press("enter")
+            created = app.plan
+            assert app.lists and created.title == "november"
+            assert (created.start, created.end) == (
+                datetime(2026, 11, 6),
+                datetime(2026, 12, 1),
+            )
+            await pilot.press("at")
+            fill(**{"from-time": "10:30"})
+            await pilot.press("enter")
+            assert app.plan.start == datetime(2026, 11, 6, 10, 30)
+            await pilot.press("u")
+            assert app.store.spans() == (created,)
+
+    asyncio.run(create())
+
+
+def test_the_picker_deletes_lists_moving_on_and_restores_them(app):
+    first, second = week("first"), week("second", datetime(2026, 11, 9))
+    app.store.save(first)
+    app.store.save(second)
+
+    async def delete():
+        async with app.run_test(size=(120, 35)) as pilot:
+            await pilot.press("tab")
+            app.open_span(first)
+            await pilot.press("T")
+            picker = app.screen
+            assert isinstance(picker, ListPicker)
+            # latest to start first, with the open list selected
+            assert [s.title for s in picker.spans] == ["second", "first"]
+            assert picker.query_one("#picker", VimList).highlighted == 1
+            await pilot.press("x")
+            assert app.plan == second
+            await pilot.press("x")
+            assert not app.lists and app.store.spans() == ()
+            await pilot.press("u")
+            assert app.store.spans() == (second,)
+            await pilot.press("enter")
+            assert app.lists and app.plan == second
+
+    asyncio.run(delete())

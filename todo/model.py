@@ -5,7 +5,7 @@ from datetime import date, datetime, time
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from itertools import pairwise
-from typing import Literal
+from typing import Literal, Self
 from uuid import uuid4
 
 _DURATION_ERROR = "Use minutes, like 90, or hours and minutes, like 1h30m."
@@ -64,7 +64,8 @@ class Task:
         if self.minutes is not None:
             if self.minutes <= 0:
                 raise ValueError("A duration must be positive.")
-            # a list's schedule spans at most a day, so a longer task cannot fit it
+            # a day's schedule spans at most a day, so a longer task cannot fit
+            # it; tasks in spans keep the same cap, though nothing needs it there
             if self.minutes > DAY_MINUTES:
                 raise ValueError("A duration cannot exceed 24 hours.")
 
@@ -122,8 +123,9 @@ class Section:
 
 @dataclass(frozen=True)
 class Interval:
-    """Minutes from the start of the list's day; from DAY_MINUTES on is the
-    next day, so a list's schedule can run past midnight."""
+    """Minutes from a list's origin: midnight of a day's date, where from
+    DAY_MINUTES on is the next day, so a schedule can run past midnight; or the
+    start of a span."""
 
     start: int
     end: int
@@ -199,48 +201,23 @@ def clock(minutes: int) -> str:
     return f"{minutes // 60 % 24:02d}:{minutes % 60:02d}"
 
 
-def seconds_into(list_date: date, now: datetime) -> int:
-    """Seconds from the start of the list's day, comparable with its intervals."""
-    return int((now - datetime.combine(list_date, time())).total_seconds())
+def seconds_since(origin: datetime, now: datetime) -> int:
+    """Seconds from a list's origin, comparable with its intervals."""
+    return int((now - origin).total_seconds())
 
 
-@dataclass(frozen=True)
-class Day:
-    date: date
-    # stored in start order whatever order they are given in
-    intervals: tuple[Interval, ...]
+class Plan:
+    """Sections of tasks and the edits every kind of list shares. Each kind
+    is a frozen dataclass with a sections field, which check_sections has
+    vetted."""
+
     sections: tuple[Section, ...]
 
-    def __post_init__(self) -> None:
-        if not self.sections:
-            raise ValueError("A list needs at least one section.")
-        ordered = tuple(sorted(self.intervals, key=lambda interval: interval.start))
-        object.__setattr__(self, "intervals", ordered)
-        if any(a.end > b.start for a, b in pairwise(ordered)):
-            raise ValueError("Scheduled intervals cannot overlap.")
-        if over_a_day(ordered):
-            raise ValueError("A schedule cannot span more than 24 hours.")
-        ids = [section.id for section in self.sections]
-        ids += [task.id for task in self.tasks()]
-        if len(ids) != len(set(ids)):
-            raise ValueError("Task and section identities must be unique.")
-
-    @property
-    def blank(self) -> bool:
-        """Nothing planned: what a day without a saved list looks like."""
-        return (
-            not self.intervals
-            and len(self.sections) == 1
-            and not self.sections[0].title
-            and not self.sections[0].tasks
-        )
+    def with_sections(self, sections: tuple[Section, ...]) -> Self:
+        raise NotImplementedError
 
     def tasks(self) -> Iterator[Task]:
         return (task for section in self.sections for task in section.tasks)
-
-    def copy_to(self, list_date: date) -> Day:
-        sections = tuple(s.duplicate(keep_progress=False) for s in self.sections)
-        return Day(list_date, self.intervals, sections)
 
     def _section_index(self, section_id: str) -> int:
         for index, section in enumerate(self.sections):
@@ -248,62 +225,57 @@ class Day:
                 return index
         raise ValueError("Choose a section.")
 
-    def rename_section(self, section_id: str, title: str) -> Day:
+    def rename_section(self, section_id: str, title: str) -> Self:
         index = self._section_index(section_id)
         sections = list(self.sections)
         sections[index] = replace(sections[index], title=title)
-        return replace(self, sections=tuple(sections))
+        return self.with_sections(tuple(sections))
 
-    def insert_section(self, section: Section, index: int) -> Day:
-        return replace(
-            self,
-            sections=self.sections[:index] + (section,) + self.sections[index:],
+    def insert_section(self, section: Section, index: int) -> Self:
+        return self.with_sections(
+            self.sections[:index] + (section,) + self.sections[index:]
         )
 
-    def move_section(self, section_id: str, offset: int) -> Day:
+    def move_section(self, section_id: str, offset: int) -> Self:
         index = self._section_index(section_id)
         destination = index + offset
         if not 0 <= destination < len(self.sections):
             return self
         sections = list(self.sections)
         sections[index], sections[destination] = sections[destination], sections[index]
-        return replace(self, sections=tuple(sections))
+        return self.with_sections(tuple(sections))
 
-    def remove_section(self, section_id: str) -> Day:
+    def remove_section(self, section_id: str) -> Self:
         index = self._section_index(section_id)
         if len(self.sections) == 1:
-            # a day keeps at least one section, so removing the last one empties it
-            return replace(self, sections=(replace(self.sections[0], tasks=()),))
-        return replace(
-            self, sections=self.sections[:index] + self.sections[index + 1 :]
-        )
+            # a list keeps at least one section, so removing the last one empties it
+            return self.with_sections((replace(self.sections[0], tasks=()),))
+        return self.with_sections(self.sections[:index] + self.sections[index + 1 :])
 
-    def insert_task(self, task: Task, section_id: str, index: int) -> Day:
+    def insert_task(self, task: Task, section_id: str, index: int) -> Self:
         s = self._section_index(section_id)
         sections = list(self.sections)
         tasks = sections[s].tasks
         sections[s] = replace(
             sections[s], tasks=tasks[:index] + (task,) + tasks[index:]
         )
-        return replace(self, sections=tuple(sections))
+        return self.with_sections(tuple(sections))
 
-    def replace_task(self, task: Task) -> Day:
+    def replace_task(self, task: Task) -> Self:
         """Replaces the task with the same id, wherever it is."""
-        return replace(
-            self,
-            sections=tuple(
+        return self.with_sections(
+            tuple(
                 replace(s, tasks=tuple(task if t.id == task.id else t for t in s.tasks))
                 for s in self.sections
-            ),
+            )
         )
 
-    def remove_task(self, task_id: str) -> Day:
-        return replace(
-            self,
-            sections=tuple(
+    def remove_task(self, task_id: str) -> Self:
+        return self.with_sections(
+            tuple(
                 replace(s, tasks=tuple(t for t in s.tasks if t.id != task_id))
                 for s in self.sections
-            ),
+            )
         )
 
     def _task_position(self, task_id: str) -> tuple[int, int] | None:
@@ -313,7 +285,7 @@ class Day:
                     return s, index
         return None
 
-    def move_task(self, task_id: str, offset: Literal[-1, 1]) -> Day:
+    def move_task(self, task_id: str, offset: Literal[-1, 1]) -> Self:
         """Move a task one place; past either end of its section it joins the
         neighbouring section, as a line moves past a blank line in Markdown."""
         position = self._task_position(task_id)
@@ -333,13 +305,97 @@ class Day:
                 sections[s + offset].append(task)
         else:
             return self
-        return replace(
-            self,
-            sections=tuple(
+        return self.with_sections(
+            tuple(
                 replace(section, tasks=tuple(tasks))
                 for section, tasks in zip(self.sections, sections, strict=True)
-            ),
+            )
         )
+
+
+def check_sections(sections: tuple[Section, ...]) -> None:
+    if not sections:
+        raise ValueError("A list needs at least one section.")
+    ids = [section.id for section in sections]
+    ids += [task.id for section in sections for task in section.tasks]
+    if len(ids) != len(set(ids)):
+        raise ValueError("Task and section identities must be unique.")
+
+
+def fresh_copy(sections: tuple[Section, ...]) -> tuple[Section, ...]:
+    """The same plan under new identities, with progress starting over."""
+    return tuple(section.duplicate(keep_progress=False) for section in sections)
+
+
+@dataclass(frozen=True)
+class Day(Plan):
+    date: date
+    # stored in start order whatever order they are given in
+    intervals: tuple[Interval, ...]
+    sections: tuple[Section, ...]
+
+    def __post_init__(self) -> None:
+        check_sections(self.sections)
+        ordered = tuple(sorted(self.intervals, key=lambda interval: interval.start))
+        object.__setattr__(self, "intervals", ordered)
+        if any(a.end > b.start for a, b in pairwise(ordered)):
+            raise ValueError("Scheduled intervals cannot overlap.")
+        if over_a_day(ordered):
+            raise ValueError("A schedule cannot span more than 24 hours.")
+
+    def with_sections(self, sections: tuple[Section, ...]) -> Self:
+        return replace(self, sections=sections)
+
+    @property
+    def origin(self) -> datetime:
+        return datetime.combine(self.date, time())
+
+    @property
+    def blank(self) -> bool:
+        """Nothing planned: what a day without a saved list looks like."""
+        return (
+            not self.intervals
+            and len(self.sections) == 1
+            and not self.sections[0].title
+            and not self.sections[0].tasks
+        )
+
+    def copy_to(self, list_date: date) -> Day:
+        return Day(list_date, self.intervals, fresh_copy(self.sections))
+
+
+@dataclass(frozen=True)
+class Span(Plan):
+    """A list over any stretch of time, all of which counts: unlike a day's
+    schedule, nothing inside it is left out. Spans may overlap."""
+
+    title: str
+    # local times to the minute, which is all the store keeps
+    start: datetime
+    end: datetime
+    sections: tuple[Section, ...]
+    id: str = field(default_factory=identifier)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "title", self.title.strip())
+        check_sections(self.sections)
+        moments = (self.start, self.end)
+        if any(m.tzinfo or m.second or m.microsecond for m in moments):
+            raise ValueError("A list's start and end are local times to the minute.")
+        if self.end <= self.start:
+            raise ValueError("A list must end after it starts.")
+
+    def with_sections(self, sections: tuple[Section, ...]) -> Self:
+        return replace(self, sections=sections)
+
+    @property
+    def origin(self) -> datetime:
+        return self.start
+
+    @property
+    def intervals(self) -> tuple[Interval, ...]:
+        minutes = int((self.end - self.start).total_seconds()) // 60
+        return (Interval(0, minutes),)
 
 
 def empty_day(day: date) -> Day:
@@ -371,7 +427,8 @@ def work(tasks: Iterable[Task]) -> tuple[Fraction, Fraction]:
 
 
 def time_progress(intervals: tuple[Interval, ...], now: int) -> tuple[int, int]:
-    """Elapsed and total scheduled seconds, now being seconds_into the day."""
+    """Elapsed and total scheduled seconds, now being seconds_since the list's
+    origin."""
     return (
         sum(min(max(now - i.start * 60, 0), i.seconds) for i in intervals),
         sum(i.seconds for i in intervals),
