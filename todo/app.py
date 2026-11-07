@@ -53,20 +53,16 @@ from .model import (
     work,
 )
 
-# failures shown to the user while the draft or the list stays as it was
+# errors shown to the user, leaving the draft or list unchanged
 RECOVERABLE = (ValueError, sqlite3.Error, OSError)
 
 MAX_MESSAGES = 5
-# the stats pane's content width: all the pane has at 80 columns, and what
-# every block lines up to at any size
+# the stats pane's content width at 80 columns, used at every size
 PANE_WIDTH = 25
-# the label column of the per-point table; bars start after it
 LABEL_WIDTH = 7
 
 
 def duration(seconds: int) -> Text:
-    """Like 3h40m or 24d13h30m, with the unit letters dimmed so the digits
-    stand out."""
     parts = zip(
         (seconds // 86400, seconds // 3600 % 24, seconds // 60 % 60, seconds % 60),
         "dhms",
@@ -86,7 +82,6 @@ def rate(seconds: int | Fraction, available: Fraction) -> Text:
 
 
 def timed(tasks: tuple[Task, ...]) -> tuple[Task, ...]:
-    """The tasks work per point counts: those with both a duration and points."""
     return tuple(t for t in tasks if t.minutes and t.available is not None)
 
 
@@ -103,16 +98,13 @@ def work_per_point(task: Task) -> Fraction | None:
 
 
 class Column(NamedTuple):
-    """A sortable column of the task list."""
-
     header: str
-    # cells; a wider value is cut short with …
+    # longer values get truncated
     width: int
-    # None marks a task without the value; such tasks sort last
+    # None sorts last
     value: Callable[[Task], Fraction | int | None]
-    # the direction a first click gives and the menu lists first
+    # True if the first click sorts descending (also listed first in the menu)
     descending: bool
-    # how the menu names each direction: ascending, then descending
     words: tuple[str, str]
 
 
@@ -142,7 +134,6 @@ COLUMNS = (
 )
 
 
-# the cells before the title: a done or partial marker, then the columns
 WIDTHS = (1, *(column.width for column in COLUMNS))
 FIXED_WIDTH = sum(WIDTHS) + len(WIDTHS)
 
@@ -187,7 +178,7 @@ class Sort(NamedTuple):
 
 
 def arrange(tasks: tuple[Task, ...], sort: Sort) -> tuple[Task, ...]:
-    """Tasks in sorted order; a sort is stable, so ties keep stored order."""
+    """Stable sort. Tasks without the value go last."""
     keyed: list[tuple[Fraction | int, Task]] = []
     missing: list[Task] = []
     for task in tasks:
@@ -201,17 +192,14 @@ def arrange(tasks: tuple[Task, ...], sort: Sort) -> tuple[Task, ...]:
 
 
 class View(NamedTuple):
-    """What the task pane shows of a list under a sort and the done filter."""
+    """The task pane's rows for a list under a sort and the done filter."""
 
     plan: Day | Span
-    # as chosen, for the column names, even while sections are shown
     sort: Sort | None
-    # each section with its tasks that the filter leaves, in stored order
     groups: tuple[tuple[Section, tuple[Task, ...]], ...]
-    # the shown tasks in sorted order, or None while sections are shown:
-    # unsorted, or sorted with no task shown, which would leave no row
+    # sorted tasks, or None when sections are drawn: there is no sort, or no task is
+    # shown
     flat: tuple[Task, ...] | None
-    # how many done tasks the filter hides
     hidden: int
 
     def shown_in(self, section: Section) -> tuple[Task, ...]:
@@ -221,14 +209,14 @@ class View(NamedTuple):
         return tuple(task for _, tasks in self.groups for task in tasks)
 
     def first_row(self) -> str:
-        """Where a freshly opened list starts: its first task, else its first rule."""
+        """The row to select when a list opens: its first task, else its first rule."""
         tasks = self.flat or self.shown()
         return tasks[0].id if tasks else self.plan.sections[0].id
 
     def neighbours(self, section: Section) -> tuple[Task, ...]:
-        """The tasks a deleted task's selection may pass to: any while sorted;
-        otherwise its section's, since landing on the next section's rule
-        would make a repeated x delete that whole section."""
+        """The tasks a deleted task's selection may move to: any task while sorted,
+        otherwise only its section's. Selecting the next section's rule would let a
+        repeated x delete that whole section."""
         return self.flat or self.shown_in(section)
 
 
@@ -244,7 +232,8 @@ def view(plan: Day | Span, sort: Sort | None, hide_done: bool) -> View:
 
 
 def next_sort(current: Sort | None, column: Column) -> Sort | None:
-    """Clicking a column: its natural direction, then the reverse, then off."""
+    """The sort after a click on column: its first direction, then the reverse, then
+    none."""
     if current is None or current.column is not column:
         return Sort(column, column.descending)
     if current.descending == column.descending:
@@ -253,7 +242,6 @@ def next_sort(current: Sort | None, column: Column) -> Sort | None:
 
 
 def column_at(x: int) -> Column | None:
-    """The sortable column at x cells into a row, matching row's grid."""
     start = 0
     for width, column in zip(WIDTHS, (None, *COLUMNS), strict=True):
         if start <= x < start + width:
@@ -263,8 +251,8 @@ def column_at(x: int) -> Column | None:
 
 
 def header_row(sort: Sort | None) -> RenderableType:
-    """The column names; sorted, a rule under them stands in for the first
-    section's rule."""
+    """The column names, with a rule below them while sorted, since the sorted view has
+    no section rules."""
     cells: list[Text | str] = [""]
     for column in COLUMNS:
         if sort is not None and sort.column is column:
@@ -281,8 +269,7 @@ def section_label(section: Section) -> str:
 
 
 def section_share(section: Section, total: Fraction) -> str:
-    """The section's part of the list's points, or nothing when that says
-    nothing: no points, or all of them."""
+    """Percent of the list's points in this section, or empty at 0% and 100%."""
     _, available = score(section.tasks)
     if not available or available == total:
         return ""
@@ -306,7 +293,6 @@ class SectionRule:
             left.append(self.title, style="bold")
             left.append(" ")
         right = Text(f" {self.share} ──" if self.share else "──", style="dim")
-        # the title identifies the row, so the share gives way first
         if left.cell_len + right.cell_len >= width:
             right = Text("──", style="dim")
         left.truncate(max(width - right.cell_len - 1, 3))
@@ -315,9 +301,8 @@ class SectionRule:
 
 
 def subtotal_row(section: Section) -> Table | None:
-    """A section's totals in the task columns, or None with nothing to total.
-
-    Work per point counts only tasks with both a duration and points."""
+    """A section's totals, or None when it has neither points nor durations. Work per
+    point counts only tasks with both."""
     earned, available = score(section.tasks)
     minutes = sum(task.minutes or 0 for task in section.tasks)
     if not available and not minutes:
@@ -330,7 +315,7 @@ def subtotal_row(section: Section) -> Table | None:
         "",
         Text(number(earned) if available else "", style=style),
         Text(number(available) if available else "", style=style),
-        # unit letters stay undimmed, so the totals read as one block
+        # .plain drops the dim style from the unit letters
         Text(duration(minutes * 60).plain if minutes else "", style=style),
         Text(
             rate(timed_seconds, timed_points).plain if timed_tasks else "", style=style
@@ -354,7 +339,6 @@ def labelled(*rows: tuple[str, Text]) -> Table:
 
 
 def total(label: str, done: Text, whole: Text, progress: Fraction, color: str) -> Group:
-    """done / whole, over a bar that ends in its percentage."""
     share = f" {percentage(progress)}%"
     length = PANE_WIDTH - LABEL_WIDTH - 1 - len(share)
     filled = min(int(progress * length), length)
@@ -368,9 +352,8 @@ def total(label: str, done: Text, whole: Text, progress: Fraction, color: str) -
 
 
 def verdict(seconds: int | Fraction, good: str, bad: str) -> Text:
-    """The word gives the direction, so the duration goes unsigned and colour
-    only backs the word up. Both come from the whole seconds, so under a second
-    either way reads as 0s on the good side."""
+    """A direction word and an unsigned duration, both from whole seconds. Anything
+    under a second counts as the good word."""
     whole = int(seconds)
     word, color = (good, "blue") if whole >= 0 else (bad, "yellow")
     return Text.assemble((word, color), " ", duration(abs(whole)))
@@ -385,7 +368,6 @@ def span_text(span: Span) -> str:
 
 
 def time_rows(plan: Day | Span) -> Table:
-    """The time a list counts: a day's schedule, or a span's start and end."""
     match plan:
         case Day(intervals=()):
             return labelled(("schedule", Text("none", style="dim")))
@@ -404,12 +386,8 @@ def time_rows(plan: Day | Span) -> Table:
 
 
 def stats(plan: Day | Span, now: datetime, full_title: str | None) -> Group:
-    """The list's totals, time and work per point, and verdicts on the time
-    left: the stats pane below the time rows.
-
-    Time comes from a day's schedule or a span's whole length, and work from
-    the task durations; unscored tasks take time, so their durations count as
-    work never done."""
+    """The stats pane below the time rows. Unscored tasks' durations count as work that
+    never gets done."""
     tasks = tuple(plan.tasks())
     earned, available = score(tasks)
     elapsed, scheduled = time_progress(plan.intervals, seconds_since(plan.origin, now))
@@ -454,12 +432,11 @@ def stats(plan: Day | Span, now: datetime, full_title: str | None) -> Group:
     if available and (scheduled or timed_available):
         rates = Table.grid(padding=(0, 1))
         rates.add_column(min_width=LABEL_WIDTH, style="dim", no_wrap=True)
-        # room for 9h59m59s per point in each, which fills the pane
+        # 8 cells fit 9h59m59s
         rates.add_column(min_width=8, justify="right", no_wrap=True)
         rates.add_column(min_width=8, justify="right", no_wrap=True)
         rates.add_row("", Text("left", style="dim"), Text("all", style="dim"))
         if scheduled:
-            # with the schedule over, no time is left to spread across points
             left = (
                 Text("-")
                 if elapsed == scheduled
@@ -476,8 +453,7 @@ def stats(plan: Day | Span, now: datetime, full_title: str | None) -> Group:
 
     verdicts: list[tuple[str, Text]] = []
     if scheduled and available:
-        # the schedule spread evenly over the points, as far as they're earned;
-        # whole seconds, so pace is the difference of the two durations shown
+        # whole seconds, so pace equals earned minus elapsed as displayed
         worth = int(scheduled * earned / available)
         ahead = worth - elapsed
         verdicts.append(("earned", duration(worth)))
@@ -510,7 +486,6 @@ def stats(plan: Day | Span, now: datetime, full_title: str | None) -> Group:
 
 
 def plan_key(plan: Day | Span) -> date | str:
-    """What names a list for undo and put: a day's date, or a span's id."""
     match plan:
         case Day():
             return plan.date
@@ -526,10 +501,9 @@ class Deleted(NamedTuple):
 
 
 class Change(NamedTuple):
-    # the list undoing returns to, or on a redo stack the list redoing does
+    # the list before the change (or after it, on the redo stack)
     restores: Day | Span
     description: str
-    # the row to select afterwards: a task or section id
     subject: str | None
 
 
@@ -606,15 +580,12 @@ class VimList(OptionList):
     def action_half_page(self, direction: int) -> None:
         if self.highlighted is None:
             return
-        # every row is one line, so a page of lines is a page of rows
         step = max(self.scrollable_content_region.height // 2, 1)
         self.highlighted = self.selectable_near(
             self.highlighted + direction * step, direction
         )
 
     def selectable_near(self, index: int, direction: int) -> int:
-        """The row at index, clamped to the list, if the cursor may rest there;
-        else the nearest one in direction, else the nearest the other way."""
         options = self.options
         start = min(max(index, 0), len(options) - 1)
         for step in (direction, -direction):
@@ -627,12 +598,11 @@ class VimList(OptionList):
 
 
 class TaskList(VimList):
-    """A click only moves the cursor, so the mouse can pick a row for the
-    footer or the menu without acting on it; a right-click also asks for the
-    row's menu."""
+    """A click moves the cursor and does nothing else, and a right-click also asks for
+    the row menu."""
 
-    # here rather than on the app, where the screen's tab, which moves focus,
-    # would take it first; a priority binding would also take tab in dialogs
+    # Screen binds tab to focus_next, which runs before app bindings, and a priority
+    # binding would also catch tab in dialogs
     BINDINGS = [Binding("tab", "app.toggle_lists", "Days or lists", show=False)]
 
     class MenuRequested(Message):
@@ -641,7 +611,7 @@ class TaskList(VimList):
             self.screen_offset = screen_offset
 
     def on_click(self, event: events.Click) -> None:
-        # skips OptionList's handler, which would select the row as ⏎ does
+        # OptionList's own handler selects the row, as ⏎ does
         event.prevent_default()
         index = event.style.meta.get("option")
         if index is None or self.options[index].disabled:
@@ -658,19 +628,17 @@ class MenuItem(NamedTuple):
 
 
 class RowMenu(ModalScreen[Callable[[], object] | None]):
-    """Groups of actions, each beside its key, with a rule between groups,
-    drawn by the click that opened it. Dismisses with the chosen action,
-    which runs once the menu is gone."""
+    """Groups of actions with their keys, separated by rules and drawn at a screen
+    position. Dismisses with the chosen action for the caller to run."""
 
     BINDINGS = [("escape", "dismiss", "Close")]
 
     def __init__(self, groups: tuple[tuple[MenuItem, ...], ...], at: Offset):
         super().__init__()
         self.at = at
-        # in option order: OptionList doesn't count the rules as options
+        # OptionList doesn't count separators, so option indexes match this tuple
         self.items = tuple(item for group in groups for item in group)
         keys = max(len(item.key) for item in self.items) + 2
-        # each None draws a rule under the option before it
         self.options: list[Text | None] = []
         for group in groups:
             if self.options:
@@ -685,22 +653,20 @@ class RowMenu(ModalScreen[Callable[[], object] | None]):
 
     def on_mount(self) -> None:
         menu = self.query_one("#row-menu", VimList)
-        # the border and option padding take two columns or rows each, and
-        # options and rules a row each
+        # 4 = border + option padding, 2 = border
         width = max(line.cell_len for line in self.options if line) + 4
         height = len(self.options) + 2
         menu.styles.width = width
         menu.styles.height = height
         screen = self.app.size
         x = min(self.at.x, max(screen.width - width, 0))
-        # below the clicked row, else above it, else as low as fits
         y = self.at.y + 1
         if y + height > screen.height:
             y = self.at.y - height
         if y < 0:
             y = max(screen.height - height, 0)
         menu.styles.offset = (x, y)
-        # the mouse opened it, so only the hover marks a choice
+        # no starting highlight, which would look like a second hover
         menu.highlighted = None
 
     def on_click(self, event: events.Click) -> None:
@@ -713,8 +679,7 @@ class RowMenu(ModalScreen[Callable[[], object] | None]):
 
 
 class TaskPane(Vertical):
-    """The column names, the task list and its hint, all drawn from one
-    View. The cursor stays on a row the view shows and may select."""
+    """The column names, the task list and the empty-list hint, drawn from one View."""
 
     def compose(self) -> ComposeResult:
         yield Static(header_row(None), id="columns")
@@ -732,10 +697,8 @@ class TaskPane(Vertical):
         widget.highlighted = widget.get_option_index(row_id)
 
     def show(self, view: View, selection: str | None = None) -> None:
-        """Draws view, selecting the row selection names if shown, else the
-        row that was selected, else the nearest row where the cursor was.
-        The list stays scrolled where it was unless the selection is out of
-        sight."""
+        """Draws view, keeping the selection and scroll position where it can.
+        selection, if given and shown, is selected instead."""
         widget = self.query_one(VimList)
         selection = selection or self.selected_id
         old_index = widget.highlighted
@@ -746,29 +709,25 @@ class TaskPane(Vertical):
         else:
             _, total = score(view.plan.tasks())
             for section, tasks in view.groups:
-                # section and task ids are unique across both kinds (see
-                # check_sections)
+                # ids are unique across sections and tasks (see check_sections)
                 options.append(Option(SectionRule(section, total), id=section.id))
                 options.extend(Option(task_row(t), id=t.id) for t in tasks)
                 subtotal = subtotal_row(section)
                 if subtotal is not None:
                     options.append(Option(subtotal, disabled=True))
         widget.set_options(options)
-        # set_options scrolls to the top; the highlight below then scrolls
-        # only as far as it must
+        # set_options resets scroll_y to 0
         widget.scroll_y = scrolled
         ids = [option.id for option in options]
         if selection is not None and selection in ids:
             widget.highlighted = ids.index(selection)
         else:
-            # upward, so the cursor stays in its section rather than reaching
-            # the next one
+            # search upward to stay in the same section
             widget.highlighted = widget.selectable_near(old_index or 0, -1)
         empty = self.query_one("#empty", Static)
         if any(view.plan.tasks()):
             empty.update("all done · f shows them")
         else:
-            # a day's copy brings its schedule too; a span's, only tasks
             copied = "day's list" if isinstance(view.plan, Day) else "list's tasks"
             empty.update(f"o  add tasks\nc  copy another {copied}")
         empty.display = not view.shown()
@@ -783,8 +742,6 @@ class VimScroll(VerticalScroll):
 
 
 class LineButton(Static):
-    """Text that runs an action when clicked."""
-
     def __init__(self, label: str, action: str, **kwargs):
         super().__init__(label, markup=False, **kwargs)
         self.action = action
@@ -797,8 +754,6 @@ class LineButton(Static):
 
 
 def bottom_row(note: str, *buttons: tuple[str, str]) -> Horizontal:
-    """A dialog's last row: a note on what it accepts, then a button for each
-    label and action."""
     return Horizontal(
         Static(note, id="hint", classes="muted", markup=False),
         *(LineButton(label, action, classes="button") for label, action in buttons),
@@ -838,9 +793,6 @@ class Form(ModalScreen):
 
 
 class Prompt(Form):
-    """Asks for one line; on_submit acts on it, raising a RECOVERABLE error to
-    keep the prompt open with the reason shown."""
-
     def __init__(
         self,
         title: str,
@@ -869,10 +821,9 @@ class Prompt(Form):
 
 
 class TaskEditor(Form):
-    """Edits one task, or adds tasks one after another until closed; on_submit
-    saves each, raising a RECOVERABLE error to keep the draft."""
+    """Edits one task, or keeps adding tasks until closed. on_submit raises a
+    RECOVERABLE error to keep the draft."""
 
-    # what a field accepts, told in the hint while it has focus
     FIELD_HINTS = {
         "available": "blank for unscored",
         "minutes": "minutes, or like 1h30m",
@@ -917,9 +868,8 @@ class TaskEditor(Form):
                     select_on_focus=False,
                 )
             yield Static("", id="error", markup=False)
-            # the list is hidden behind the dialog, so confirm each added task
+            # the dialog hides the list, so show what was added
             yield Static("", id="added", classes="muted", markup=False)
-            # adding saves each task, so closing loses nothing
             if self.edited_task:
                 yield save_and_cancel("")
             else:
@@ -952,7 +902,6 @@ def time_field(value: str, column: str) -> Input:
 
 
 def read_time(row: int, column: str, text: str) -> int:
-    """A row's start or end time, with the row and column named on failure."""
     if not text.strip():
         raise ValueError(f"Row {row} is missing its {column} time.")
     try:
@@ -972,21 +921,20 @@ def read_row(row: int, start: str, end: str) -> tuple[int, int] | None:
 
 
 class AddLine(LineButton, can_focus=True):
-    """The line under the schedule's rows that adds one; up and down reach it,
-    so the keyboard can add a row past the last."""
+    """Adds a schedule row. It takes focus, so up and down can reach it past the last
+    row."""
 
     BINDINGS = [Binding("enter,space", "press", "Add interval", show=False)]
 
 
 class ScheduleEditor(Form):
-    """Edits a schedule as one row per interval, written in order, so a row
-    that starts before the previous one ends falls on the next day. Blank rows
-    drop out on save; on_submit saves the intervals, raising a RECOVERABLE
-    error to keep the draft."""
+    """One row per interval, in order. A row that starts before the previous one ends is
+    on the next day, and blank rows are dropped. on_submit raises a RECOVERABLE error
+    to keep the draft."""
 
     BINDINGS = [
-        # priority, since a focused field takes printable keys first; the
-        # fields refuse + and - anyway
+        # priority so a focused Input doesn't swallow these. The time fields reject +
+        # and - anyway.
         Binding("plus", "add_row", "Add interval", show=False, priority=True),
         Binding("minus", "remove_row", "Remove interval", show=False, priority=True),
         Binding("up", "move(-1)", "Previous row", show=False),
@@ -1031,7 +979,7 @@ class ScheduleEditor(Form):
                     yield self.row(interval)
             with Horizontal(id="row-actions"):
                 yield AddLine("+ add interval", "screen.add_row", classes="row-action")
-                # unfocusable, so a click leaves focus on the row it removes
+                # must not take focus, since the action removes the focused row
                 yield LineButton(
                     "- remove interval", "screen.remove_row", classes="row-action"
                 )
@@ -1053,8 +1001,8 @@ class ScheduleEditor(Form):
 
     @on(Input.Changed)
     def update_notes(self) -> None:
-        """Each readable row's duration, and next day where the order carries
-        its start past midnight; nothing while the schedule can't be read."""
+        """Shows each row's duration, and "next day" where it applies. Shows nothing if
+        the schedule doesn't parse."""
         rows = self.rows()
         readable: dict[int, tuple[int, int]] = {}
         for row, (start, end, _) in enumerate(rows, 1):
@@ -1085,14 +1033,13 @@ class ScheduleEditor(Form):
         return None
 
     async def action_add_row(self) -> None:
-        """A blank row below the focused one, or at the end."""
         row = self.row(None)
         await self.query_one("#intervals").mount(row, after=self.focused_row())
         row.query_one(".start", Input).focus()
 
     def action_move(self, offset: int) -> None:
-        """Up or down a row, keeping to the start or end column; below the
-        last row is the add line."""
+        """Moves focus to the same column in the row above or below. Below the last row
+        is the add line."""
         rows = list(self.query(".interval").results(Horizontal))
         add = self.query_one(AddLine)
         if self.focused is add:
@@ -1109,13 +1056,12 @@ class ScheduleEditor(Form):
             rows[index].query_one(self.focused_column(), Input).focus()
 
     def focused_column(self) -> str:
-        """The selector of the focused field's column."""
         focused = self.focused
         return ".end" if focused is not None and focused.has_class("end") else ".start"
 
     async def action_remove_row(self) -> None:
-        """Removes the focused row, keeping to its column in the row that takes
-        its place, else the row above, else the add line."""
+        """Removes the focused row. Focus moves to the same column in the next row, else
+        the previous row, else the add line."""
         current = self.focused_row()
         if current is None:
             return
@@ -1128,7 +1074,7 @@ class ScheduleEditor(Form):
             rows[min(index, len(rows) - 1)].query_one(column, Input).focus()
         else:
             self.query_one(AddLine).focus()
-        # a later row's start may no longer fall on the next day
+        # removing a row can change which later rows start on the next day
         self.update_notes()
 
     def save(self) -> None:
@@ -1194,9 +1140,8 @@ class HelpScreen(ModalScreen):
 
 
 def read_moment(name: str, day_text: str, time_text: str, *, end: bool) -> datetime:
-    """A start or end from its date and time fields, naming the field on
-    failure. A blank time is the date's start, or for an end its close, so a
-    span between two dates covers both whole."""
+    """A start or end from its date and time fields, naming the field on failure. A
+    blank time means the start of the date, or for an end, midnight after it."""
     try:
         day = parse_date(day_text)
     except ValueError as error:
@@ -1212,10 +1157,6 @@ def read_moment(name: str, day_text: str, time_text: str, *, end: bool) -> datet
 
 
 class SpanEditor(Form):
-    """Edits a span's title, start and end, or gives them for a new span when
-    there is none; on_submit takes them, raising a RECOVERABLE error to keep
-    the draft."""
-
     def __init__(
         self,
         span: Span | None,
@@ -1280,7 +1221,6 @@ class SpanEditor(Form):
 
     @on(Input.Changed)
     def update_length(self) -> None:
-        """How long the span would be, while its fields can be read."""
         try:
             start, end = self.read()
         except ValueError:
@@ -1304,8 +1244,8 @@ def span_status(span: Span, now: datetime) -> str:
 
 
 def picker_lines(spans: tuple[Span, ...], now: datetime) -> list[Text]:
-    """A row per span: title, start and end, how much is done, and whether it
-    covers now; each column filled, with - for a missing value."""
+    """One row per span: title, span, percent done and status, with - for a missing
+    value."""
     titles = [span.title or "-" for span in spans]
     width = max((Text(title).cell_len for title in titles), default=0)
     lines = []
@@ -1321,8 +1261,8 @@ def picker_lines(spans: tuple[Span, ...], now: datetime) -> list[Text]:
 
 
 class ListManager(NamedTuple):
-    """What the picker asks the app to do with lists; delete and restore give
-    the spans left, restore None when there is nothing to bring back."""
+    """Callbacks the picker uses. delete and restore return the remaining spans, or None
+    from restore if nothing was deleted."""
 
     new: Callable[[], object]
     delete: Callable[[Span], tuple[Span, ...]]
@@ -1330,9 +1270,8 @@ class ListManager(NamedTuple):
 
 
 class ListPicker(ModalScreen):
-    """The span lists, latest to start first. Choosing one dismisses and passes
-    it to on_choose; with a manager, the picker also adds lists, and deletes
-    and restores them in place."""
+    """The span lists, latest start first. Choosing one calls on_choose. With a manager,
+    the picker can also add lists and delete and restore them."""
 
     BINDINGS = [
         ("escape", "dismiss", "Close"),
@@ -1379,8 +1318,6 @@ class ListPicker(ModalScreen):
         self.show(self.spans, self.selected)
 
     def show(self, spans: tuple[Span, ...], selected: str | None) -> None:
-        """Draws spans latest first, selecting the span named, else the row
-        where the cursor was."""
         picker = self.query_one("#picker", VimList)
         old_index = picker.highlighted or 0
         self.spans = tuple(reversed(spans))
@@ -1394,7 +1331,7 @@ class ListPicker(ModalScreen):
             )
         picker.display = bool(self.spans)
         self.query_one("#no-lists").display = not self.spans
-        # hiding the list with nothing in it took its focus
+        # the list lost focus while hidden
         if self.spans:
             picker.focus()
 
@@ -1450,7 +1387,7 @@ class TodoApp(App):
         Binding("P", "put(False)", "Put above", show=False),
         Binding("u", "undo", "Undo"),
         Binding("ctrl+r", "redo", "Redo", show=False),
-        # one for each mode, so the footer names what @ edits there
+        # check_action picks which one shows
         Binding("@", "edit_time('days')", "Schedule"),
         Binding("@", "edit_time('lists')", "Span"),
         Binding("question_mark", "help", "Keys"),
@@ -1465,32 +1402,28 @@ class TodoApp(App):
         Binding("[", "shift(-1)", "Previous", show=False),
         Binding("]", "shift(1)", "Next", show=False),
         Binding("t", "today", "Today", show=False),
-        # hidden for room at 80 columns; ? lists it
+        # no room in the footer at 80 columns
         Binding("q", "quit", "Quit", show=False),
     ]
 
     def __init__(self, store: Store, list_date: date):
         super().__init__(ansi_color=True)
         self.store = store
-        # undo and redo stacks per list, kept while the app runs; the store's
-        # lock means nothing else changes a list behind them
+        # per list, for this session only. Safe because the store is locked.
         self.histories: dict[date | str, list[Change]] = {}
         self.redos: dict[date | str, list[Change]] = {}
         self.deleted: Deleted | None = None
-        # spans deleted from the picker, newest last, for it to restore
         self.deleted_spans: list[Span] = []
-        # views that apply to every list until quit, never stored
+        # session-wide, not saved
         self.sort: Sort | None = None
         self.hide_done = False
-        # the day days mode shows, and the span lists mode shows; lists mode
-        # is on only while there is a span to show
+        # lists is True only while span is set
         self.day = store.load(list_date)
         self.span: Span | None = None
         self.lists = False
 
     @property
     def plan(self) -> Day | Span:
-        """The list on screen."""
         if not self.lists:
             return self.day
         if self.span is None:
@@ -1505,14 +1438,13 @@ class TodoApp(App):
                 self.span = plan
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
-        # edit_time's parameter only picks which footer label shows
         if action == "edit_time" and parameters:
             return parameters[0] == ("lists" if self.lists else "days")
         return True
 
     def on_notify(self) -> None:
-        # textual has no public limit on toasts, and this handler runs before
-        # textual's own adds the new one, so trim once the message is handled
+        # textual has no public limit on toasts, and this handler runs before textual's
+        # own adds the new one, so trim after the message is handled
         self.call_next(self.trim_messages)
 
     def trim_messages(self) -> None:
@@ -1561,8 +1493,6 @@ class TodoApp(App):
         )
 
     def action_shift(self, offset: int) -> None:
-        """The previous or next day, or span by start; there is none past the
-        first or last span."""
         if self.lists:
             spans = self.store.spans()
             index = [s.id for s in spans].index(self.plan_id()) + offset
@@ -1600,10 +1530,7 @@ class TodoApp(App):
         self.redraw(self.current_view().first_row())
 
     def selected(self) -> tuple[Section, Task | None]:
-        """The highlighted row: a task with its section, or a section's rule.
-
-        A list always has a section and redraw always highlights a row, so a
-        missing row is a bug rather than a state to handle."""
+        """The highlighted row: a task with its section, or a section's rule."""
         row_id = self.query_one(TaskPane).selected_id
         for section in self.plan.sections:
             if row_id == section.id:
@@ -1617,8 +1544,8 @@ class TodoApp(App):
         return view(self.plan, self.sort, self.hide_done)
 
     def refuse_while_sorted(self, action: str) -> bool:
-        """Says so when the sorted list hides the order or sections an action
-        works on."""
+        """Notifies and returns True when the sorted view hides the order or sections an
+        action needs."""
         if self.sort is None or self.current_view().flat is None:
             return False
         self.notify(
@@ -1664,7 +1591,7 @@ class TodoApp(App):
         _, task = self.selected()
         if task is not None:
             tasks = self.query_one("#tasks", VimList)
-            # option padding takes one column on each side
+            # option padding, one column on each side
             width = tasks.scrollable_content_region.width - 2 - FIXED_WIDTH
             if Text(task.title).cell_len > width:
                 full_title = task.title
@@ -1688,8 +1615,8 @@ class TodoApp(App):
             action()
 
     def row_actions(self) -> tuple[MenuItem, ...]:
-        """What the selected row's keys do, most used first. Actions refused
-        while sorted stay listed, and say why when chosen."""
+        """Menu items for the selected row, most used first. Actions refused while
+        sorted are still listed and explain the refusal when chosen."""
         _, task = self.selected()
         items: list[MenuItem] = []
         if task is None:
@@ -1728,7 +1655,6 @@ class TodoApp(App):
         return tuple(items)
 
     def day_actions(self) -> tuple[MenuItem, ...]:
-        """The keys with no place on the date line or in the footer."""
         kind = "list" if self.lists else "day"
         return (
             MenuItem(
@@ -1762,9 +1688,9 @@ class TodoApp(App):
         *,
         select: str | None = None,
     ) -> bool:
-        """Save a change to the open list about the subject row, which is
-        selected after the change unless select names another row, and again
-        after undoing. Returns whether anything changed."""
+        """Saves a change to the open list and records it for undo. The subject row is
+        selected afterwards, and again after undoing, unless select names another
+        row. Returns whether anything changed."""
         before = self.plan
         if plan == before:
             return False
@@ -1791,8 +1717,8 @@ class TodoApp(App):
             return False
 
     def insertion_point(self, below: bool) -> tuple[Section, int]:
-        """Where a task goes relative to the selected row; a rule's section
-        starts just below it, so both directions give its top."""
+        """The section and index for a task next to the selected row. On a rule, both
+        directions give the top of its section."""
         section, task = self.selected()
         if task is None:
             return section, 0
@@ -1810,7 +1736,6 @@ class TodoApp(App):
                 f"added {task.title}",
                 task.id,
             )
-            # each further task goes below the last, like lines typed after o
             index += 1
 
         self.push_screen(
@@ -1925,8 +1850,8 @@ class TodoApp(App):
         )
 
     def action_edit_time(self, mode: str = "") -> None:
-        """A day's schedule, or a span's title and time; mode is for the
-        footer, which check_action reads."""
+        """Opens the schedule editor for a day or the span editor for a span. Only
+        check_action reads mode."""
         match self.plan:
             case Day() as day:
                 self.push_screen(
@@ -1952,9 +1877,6 @@ class TodoApp(App):
         self.action_show_mode("days" if self.lists else "lists")
 
     def action_show_mode(self, mode: str) -> None:
-        """Days, or the span last open; with none open yet, the latest to start
-        of those covering now, else the latest to start; with no spans, a new
-        one."""
         if mode == "days":
             self.lists = False
             self.redraw(self.current_view().first_row())
@@ -2009,9 +1931,7 @@ class TodoApp(App):
         )
 
     def delete_span(self, span: Span) -> tuple[Span, ...]:
-        """Deletes span for the picker, which restore_span can bring back, and
-        gives the spans left. The open span passes to the next by start, or
-        the previous; with none left, days show."""
+        """Deletes span and returns the spans left. restore_span can bring it back."""
         spans = self.store.spans()
         index = [s.id for s in spans].index(span.id)
         self.store.delete_span(span.id)
@@ -2025,8 +1945,8 @@ class TodoApp(App):
         return left
 
     def restore_span(self) -> tuple[Span, ...] | None:
-        """Brings back the span deleted last, giving all the spans; None when
-        nothing was deleted."""
+        """Restores the span deleted last and returns all spans, or None when nothing
+        was deleted."""
         if not self.deleted_spans:
             return None
         self.store.save(self.deleted_spans.pop())
@@ -2082,7 +2002,7 @@ class TodoApp(App):
         if self.deleted is None:
             self.notify("Nothing deleted to put.", timeout=2)
             return
-        # progress belongs to the list it was made on
+        # keep progress only when putting back into the same list
         keep_progress = self.deleted.source == plan_key(self.plan)
         copied = self.deleted.row.duplicate(keep_progress=keep_progress)
         if isinstance(copied, Task):
@@ -2119,9 +2039,9 @@ class TodoApp(App):
             )
 
     def action_jump_section(self, offset: Literal[-1, 1]) -> None:
-        """Vim's paragraph motions over rules: } to the next rule, or the last
-        row from the last section; { to this section's rule, or from a rule
-        to the one before."""
+        """Vim's paragraph motions over rules. } goes to the next rule, or from the last
+        section to its last row. { goes to this section's rule, or from a rule to the
+        previous one."""
         if self.refuse_while_sorted("jump between sections"):
             return
         section, task = self.selected()
@@ -2150,7 +2070,7 @@ class TodoApp(App):
     @on(events.Click, "#columns")
     def sort_by_column(self, event: events.Click) -> None:
         offset = event.get_content_offset(self.query_one("#columns"))
-        # only the names: a rule may sit under them
+        # only row 0 has column names
         column = column_at(offset.x) if offset and offset.y == 0 else None
         if column is not None:
             self.set_sort(next_sort(self.sort, column))
@@ -2171,7 +2091,8 @@ class TodoApp(App):
         verb: str,
         past: str,
     ) -> None:
-        """Return to the list on top of source, recording the way back on target."""
+        """Undo or redo: restore the change on top of source, and push the current
+        list onto target."""
         key = plan_key(self.plan)
         stack = source.get(key)
         if not stack:
@@ -2213,7 +2134,6 @@ def main() -> None:
         store = Store(args.database.expanduser())
     except RECOVERABLE as error:
         parser.exit(2, f"todo: {error}\n")
-    # the store holds an exclusive lock, so release it however the app ends
     with closing(store):
         try:
             app = TodoApp(store, args.date)

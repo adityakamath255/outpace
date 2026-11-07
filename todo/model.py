@@ -26,8 +26,7 @@ def points(value: str) -> Fraction:
 
 
 def parse_minutes(value: str) -> int | None:
-    """Reads a duration in minutes, from 90 or 1h30m; Task decides which
-    durations are allowed."""
+    """Reads 90 or 1h30m as minutes. Task checks the range."""
     value = value.strip().lower()
     if not value:
         return None
@@ -43,7 +42,7 @@ def parse_minutes(value: str) -> int | None:
 @dataclass(frozen=True)
 class Task:
     title: str
-    # None makes an unscored task: a plain list item, never done or not done
+    # None means unscored: a plain list item with no done state
     available: Fraction | None
     earned: Fraction = Fraction(0)
     minutes: int | None = None
@@ -64,8 +63,7 @@ class Task:
         if self.minutes is not None:
             if self.minutes <= 0:
                 raise ValueError("A duration must be positive.")
-            # a day's schedule spans at most a day, so a longer task cannot fit
-            # it; tasks in spans keep the same cap, though nothing needs it there
+            # a task has to fit in a day's schedule
             if self.minutes > DAY_MINUTES:
                 raise ValueError("A duration cannot exceed 24 hours.")
 
@@ -123,9 +121,8 @@ class Section:
 
 @dataclass(frozen=True)
 class Interval:
-    """Minutes from a list's origin: midnight of a day's date, where from
-    DAY_MINUTES on is the next day, so a schedule can run past midnight; or the
-    start of a span."""
+    """Minutes from the list's origin: midnight for a day, or the span's start. In a
+    day, values past DAY_MINUTES are on the next day."""
 
     start: int
     end: int
@@ -172,8 +169,7 @@ def schedule(clocks: Iterable[tuple[int, int]]) -> tuple[Interval, ...]:
         while start < previous_end:
             start += DAY_MINUTES
         intervals.append(Interval(start, start + (end - start) % DAY_MINUTES))
-    # an interval written out of order would otherwise roll silently into
-    # tomorrow; Day would refuse it too, but without saying how to fix it
+    # writing intervals out of order would push them onto the next day
     if over_a_day(tuple(intervals)):
         raise ValueError(
             "The schedule spans more than 24 hours; write its intervals in order."
@@ -286,8 +282,8 @@ class Plan:
         return None
 
     def move_task(self, task_id: str, offset: Literal[-1, 1]) -> Self:
-        """Move a task one place; past either end of its section it joins the
-        neighbouring section, as a line moves past a blank line in Markdown."""
+        """Moves a task up or down one place, crossing into the neighbouring section at
+        either end."""
         position = self._task_position(task_id)
         if position is None:
             return self
@@ -352,7 +348,7 @@ class Day(Plan):
 
     @property
     def blank(self) -> bool:
-        """Nothing planned: what a day without a saved list looks like."""
+        """True when nothing is planned. Unsaved days load as blank."""
         return (
             not self.intervals
             and len(self.sections) == 1
@@ -366,8 +362,8 @@ class Day(Plan):
 
 @dataclass(frozen=True)
 class Span(Plan):
-    """A list over any stretch of time, all of which counts: unlike a day's
-    schedule, nothing inside it is left out. Spans may overlap."""
+    """A list from start to end. All of that time counts toward the stats, and
+    spans may overlap."""
 
     title: str
     # local times to the minute, which is all the store keeps

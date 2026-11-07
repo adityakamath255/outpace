@@ -7,7 +7,7 @@ from typing import Any
 
 from .model import Day, Interval, Section, Span, Task, empty_day
 
-# 3 added spans; a version 2 database gains their table on opening
+# version 3 added the spans table; version 2 databases get it on open
 VERSION = 3
 SPANS_TABLE = "CREATE TABLE spans (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
 
@@ -44,8 +44,7 @@ def decode_sections(data: list[dict[str, Any]]) -> tuple[Section, ...]:
                     None if task["available"] is None else Fraction(task["available"]),
                     Fraction(task["earned"]),
                     task["minutes"],
-                    # days stored earlier also carry "checked", the done
-                    # state unscored tasks no longer have; it is dropped
+                    # older days also have a "checked" field, which is ignored
                     id=task["id"],
                 )
                 for task in section["tasks"]
@@ -99,12 +98,9 @@ def decode_span(span_id: str, text: str) -> Span:
 
 
 class Store:
-    """One JSON document per day, keyed by its ISO date, and one per span,
-    keyed by its id.
-
-    The store holds the database exclusively until closed, so no other session
-    can change a list underneath this one. A blank day is never stored, so a
-    blank day and a missing one are the same; a span stays until deleted."""
+    """One JSON document per day, keyed by ISO date, and one per span, keyed by id.
+    Holds the database exclusively until closed. Blank days aren't stored, so loading
+    a missing day gives a blank one. Spans stay until deleted."""
 
     def __init__(self, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,8 +153,7 @@ class Store:
         )
 
     def spans(self) -> tuple[Span, ...]:
-        """Every span, by start and then end; there are few enough to load
-        them all."""
+        """All spans, sorted by start then end. There are few enough to load at once."""
         spans = (
             decode_span(span_id, data)
             for span_id, data in self.connection.execute("SELECT id, data FROM spans")

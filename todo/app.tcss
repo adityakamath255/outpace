@@ -28,7 +28,6 @@ Screen {
     width: 1fr;
 }
 
-/* the mode on screen at full strength, the other dimmed */
 #days-mode, #lists-mode {
     padding: 0 1;
     text-style: dim;
@@ -58,11 +57,11 @@ Screen {
 
 #columns {
     height: auto;
-    /* option padding plus the scrollbar gutter, so headers sit over their values */
+    /* option padding plus the scrollbar gutter, to align the names with the values */
     padding: 0 2 0 1;
 }
 
-/* the space under the column names, which the list may fill but not exceed */
+/* the list may fill this but not grow past it */
 #list-area {
     height: 1fr;
 }
@@ -73,7 +72,7 @@ VimList {
     border: none;
     background: ansi_default;
     padding: 0;
-    /* titles truncate, so a list never scrolls sideways */
+    /* no horizontal scrollbar; titles truncate instead */
     scrollbar-size: 0 1;
     scrollbar-gutter: stable;
     scrollbar-background: ansi_default;
@@ -98,7 +97,7 @@ VimList:focus > .option-list--option-highlighted {
     text-style: bold;
 }
 
-/* subtotal rows: shown at full strength, only the cursor skips them */
+/* subtotal rows are disabled options, styled like enabled ones */
 VimList > .option-list--option-disabled {
     color: ansi_default;
 }
@@ -121,7 +120,7 @@ VimList > .option-list--option-hover {
     border-left: solid ansi_black;
 }
 
-/* as wide as its rows, so the hover ends where the values do */
+/* auto width keeps the hover background inside the values */
 #schedule {
     width: auto;
     height: auto;
@@ -173,7 +172,6 @@ ModalScreen {
     margin-bottom: 1;
 }
 
-/* one-row fields on a dark background, so they show without a border */
 .dialog Input, .dialog Input:focus {
     width: 1fr;
     height: 1;
@@ -192,7 +190,6 @@ ModalScreen {
     text-style: dim;
 }
 
-/* message lines appear only with a message, each set off by a blank row */
 #error, #added {
     display: none;
     height: auto;
@@ -223,7 +220,7 @@ ModalScreen {
     text-style: bold;
 }
 
-/* a context menu over the list, which stays visible around it */
+/* transparent, to keep the list visible around the menu */
 RowMenu {
     align: left top;
     background: transparent;
@@ -330,7 +327,6 @@ Toast {
     width: 8;
 }
 
-/* the time format reads as the title's second line */
 #schedule-dialog .dialog-title {
     margin-bottom: 0;
 }
@@ -339,7 +335,7 @@ Toast {
     margin-bottom: 1;
 }
 
-/* outside the scrolled keys, so close stays in view */
+/* docked, to keep close visible while the keys scroll */
 #help-dialog .bottom-row {
     dock: bottom;
 }
@@ -348,8 +344,6 @@ Toast {
     height: auto;
 }
 
-/* a blank row between intervals, so their fields don't merge into a block;
-   the add and remove lines take the place of the next row */
 .interval {
     height: 1;
     margin-bottom: 1;
@@ -374,7 +368,7 @@ Toast {
     height: 1;
 }
 
-/* padded like the fields, so their text starts at the times' first digit */
+/* padded like the fields, to align with the times' first digit */
 .row-action {
     width: auto;
     margin-right: 2;

@@ -192,7 +192,7 @@ def test_schedule_continues_past_midnight_in_order():
 
 
 def test_schedule_rejects_intervals_out_of_order():
-    # the second interval would land on the next day
+    # the second interval would start on the next day
     with pytest.raises(ValueError, match="24 hours"):
         schedule([(450, 660), (630, 720)])
 
