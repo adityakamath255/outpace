@@ -351,12 +351,11 @@ def total(label: str, done: Text, whole: Text, progress: Fraction, color: str) -
     return Group(labelled((label, done + Text(" / ") + whole)), bar)
 
 
-def verdict(seconds: int | Fraction, good: str, bad: str) -> Text:
-    """A direction word and an unsigned duration, both from whole seconds. Anything
-    under a second counts as the good word."""
-    whole = int(seconds)
-    word, color = (good, "blue") if whole >= 0 else (bad, "yellow")
-    return Text.assemble((word, color), " ", duration(abs(whole)))
+def pace(ahead: int) -> Text:
+    if not ahead:
+        return Text("on pace")
+    word, color = ("ahead", "blue") if ahead > 0 else ("behind", "yellow")
+    return Text.assemble((word, color), " ", duration(abs(ahead)))
 
 
 def moment(value: datetime) -> str:
@@ -393,12 +392,12 @@ def stats(plan: Day | Span, now: datetime, full_title: str | None) -> Group:
     elapsed, scheduled = time_progress(plan.intervals, seconds_since(plan.origin, now))
     worked, needed = work(tasks)
     timed_tasks = timed(tasks)
-    timed_earned, timed_available = score(timed_tasks)
-    timed_worked, timed_needed = work(timed_tasks)
+    _, timed_available = score(timed_tasks)
+    _, timed_needed = work(timed_tasks)
 
-    totals: list[RenderableType] = []
+    blocks: list[RenderableType] = []
     if scheduled:
-        totals.append(
+        blocks.append(
             total(
                 "time",
                 duration(elapsed),
@@ -408,7 +407,7 @@ def stats(plan: Day | Span, now: datetime, full_title: str | None) -> Group:
             )
         )
     if available:
-        totals.append(
+        blocks.append(
             total(
                 "pts",
                 Text(number(earned)),
@@ -418,7 +417,7 @@ def stats(plan: Day | Span, now: datetime, full_title: str | None) -> Group:
             )
         )
     if needed:
-        totals.append(
+        blocks.append(
             total(
                 "work",
                 duration(int(worked)),
@@ -428,47 +427,24 @@ def stats(plan: Day | Span, now: datetime, full_title: str | None) -> Group:
             )
         )
 
-    blocks: list[RenderableType] = list(totals)
-    if available and (scheduled or timed_available):
-        rates = Table.grid(padding=(0, 1))
-        rates.add_column(min_width=LABEL_WIDTH, style="dim", no_wrap=True)
-        # 8 cells fit 9h59m59s
-        rates.add_column(min_width=8, justify="right", no_wrap=True)
-        rates.add_column(min_width=8, justify="right", no_wrap=True)
-        rates.add_row("", Text("left", style="dim"), Text("all", style="dim"))
-        if scheduled:
-            left = (
-                Text("-")
-                if elapsed == scheduled
-                else rate(scheduled - elapsed, available - earned)
-            )
-            rates.add_row("time/pt", left, rate(scheduled, available))
-        if timed_available:
-            rates.add_row(
-                "work/pt",
-                rate(timed_needed - timed_worked, timed_available - timed_earned),
-                rate(timed_needed, timed_available),
-            )
-        blocks.append(rates)
+    rates: list[tuple[str, Text]] = []
+    if scheduled and available:
+        rates.append(("time/pt", rate(scheduled, available)))
+    if timed_available:
+        rates.append(("work/pt", rate(timed_needed, timed_available)))
+    if rates:
+        blocks.append(labelled(*rates))
 
     verdicts: list[tuple[str, Text]] = []
     if scheduled and available:
         # whole seconds, so pace equals earned minus elapsed as displayed
         worth = int(scheduled * earned / available)
-        ahead = worth - elapsed
         verdicts.append(("earned", duration(worth)))
-        verdicts.append(
-            ("pace", verdict(ahead, "ahead", "behind") if ahead else Text("on pace"))
-        )
+        verdicts.append(("pace", pace(worth - elapsed)))
     if scheduled and needed:
-        whole = "all day" if isinstance(plan, Day) else "whole list"
-        verdicts.append((whole, verdict(scheduled - needed, "spare", "over")))
-        verdicts.append(
-            (
-                "from now",
-                verdict(scheduled - elapsed - (needed - worked), "spare", "over"),
-            )
-        )
+        margin = (scheduled - needed) / scheduled
+        style = "yellow" if margin < 0 else ""
+        verdicts.append(("margin", Text(f"{percentage(margin)}%", style=style)))
     if verdicts:
         blocks.append(labelled(*verdicts))
 

@@ -369,16 +369,6 @@ def test_stats_fit_the_pane_at_80_columns():
     # over ten hours elapsed, with seconds, makes the widest time row
     rows = pane_rows(day, datetime(2026, 11, 1, 18, 22, 26))
     assert "time 10h52m26s / 15h30m" in rows
-    # fewer points than hours, with seconds, makes the widest per-point row
-    big = Task("Big", points("4"), points("1"), 300)
-    other = Task("Other", points("3"), minutes=200)
-    sparse = Day(
-        day.date,
-        written("08:00-15:30, 19:00-23:00"),
-        (Section("", (big, other)),),
-    )
-    rows = pane_rows(sparse, datetime(2026, 11, 1, 9, 13, 7))
-    assert "time/pt 1h42m48s 1h38m34s" in rows
 
 
 def test_the_stats_pane_has_its_width_at_80_columns(app):
@@ -389,39 +379,31 @@ def test_the_stats_pane_has_its_width_at_80_columns(app):
     asyncio.run(measure())
 
 
-def test_stats_compare_time_with_work_for_the_day_and_from_now():
+def test_stats_compare_time_with_work():
     cheap = Task("Cheap", points("5"), points("5"), 60)
-    dear = Task("Dear", points("5"), minutes=540)
+    dear = Task("Dear", points("5"), minutes=600)
     day = Day(date(2026, 11, 1), written("08:00-18:00"), (Section("", (cheap, dear)),))
     rows = pane_rows(day, datetime(2026, 11, 1, 10))
-    # the cheap points are done, so pace looks ahead while the rest won't fit
+    # the cheap points are done, so pace looks ahead while the day is overbooked
     for row in (
         "time 2h / 10h",
         "pts 5 / 10",
-        "work 1h / 10h",
-        "time/pt 1h36m 1h",
-        "work/pt 1h48m 1h",
+        "work 1h / 11h",
+        "time/pt 1h",
+        "work/pt 1h6m",
         "earned 5h",
         "pace ahead 3h",
-        "all day spare 0s",
-        "from now over 1h",
+        "margin -10.00%",
     ):
         assert row in rows
 
 
-def test_verdicts_name_the_direction_of_the_whole_seconds_they_show():
+def test_pace_compares_whole_seconds():
     # eleven points make a point's share of the day a fraction of a second
     task = Task("Long", points("11"), points("1"), 600)
     day = Day(date(2026, 11, 1), written("08:00-18:00"), (Section("", (task,)),))
-    # earned is 54m32.7s and work done the same; time is 54m32s
+    # earned is 54m32.7s; time is 54m32s
     assert "pace on pace" in pane_rows(day, datetime(2026, 11, 1, 8, 54, 32))
-    # a third of a second over is no whole second over
-    assert "from now spare 0s" in pane_rows(day, datetime(2026, 11, 1, 8, 54, 33))
-
-
-def test_an_ended_schedule_has_no_time_left_per_point(app):
-    rows = pane_rows(app.day, datetime(2026, 11, 2, 8))
-    assert "time/pt - 2h6m" in rows
 
 
 def test_subtotal_shows_how_much_of_its_section_is_done():
