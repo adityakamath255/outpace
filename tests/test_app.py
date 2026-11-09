@@ -81,8 +81,8 @@ def test_section_share_is_not_truncated_and_is_hidden_at_all_points():
         Console(file=output, width=44).print(SectionRule(section, total))
         return output.getvalue()
 
-    assert "50.00% of total" in rule(points("10"))
-    assert "of total" not in rule(points("5"))
+    assert "50.00% of points" in rule(points("10"))
+    assert "of points" not in rule(points("5"))
 
 
 def test_clock_callback_does_not_touch_widgets_after_shutdown(app):
@@ -125,7 +125,7 @@ def test_task_changes_save_and_undo(app):
         async with app.run_test(size=(110, 45)) as pilot:
             await pilot.pause()
             assert await pilot.click(footer_action(app, "add(True)"))
-            await pilot.press(*"2.5", "tab", *"20", "tab", *"read daily", "enter")
+            await pilot.press(*"read daily", "tab", *"2.5", "tab", *"20", "enter")
             added = next(task for task in app.day.tasks() if task.title == "read daily")
             assert (added.available, added.earned, added.minutes) == (
                 points("2.5"),
@@ -369,8 +369,8 @@ def test_the_summary_fits_80_columns():
     )
     # over ten hours elapsed, with seconds, makes the widest time row
     lines = summary_lines(day, datetime(2026, 11, 1, 18, 22, 26))
-    time_line = next(line for line in lines if line.startswith("time "))
-    assert time_line.startswith("time 10h52m26s / 15h30m")
+    time_line = next(line for line in lines if line.startswith("elapsed "))
+    assert time_line.startswith("elapsed 10h52m26s / 15h30m")
     assert time_line.endswith("70.15%")
 
 
@@ -381,14 +381,14 @@ def test_stats_compare_time_with_work():
     text = "\n".join(summary_lines(day, datetime(2026, 11, 1, 10)))
     # the cheap points are done, so pace looks ahead while the day is overbooked
     for row in (
-        "time 2h / 10h",
-        "pts 5 / 10",
+        "elapsed 2h / 10h",
+        "points 5 / 10",
         "work 1h / 11h",
-        "time/pt 1h",
-        "work/pt 1h6m",
-        "earned 5h",
+        "sched/pt 1h",
+        "dur/pt 1h6m",
+        "progress 5h",
         "pace ahead 3h",
-        "margin -10.00%",
+        "free -10.00%",
     ):
         assert row in text
 
@@ -974,14 +974,14 @@ def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
             await pilot.press("J", "}", "number_sign", "o", "O", "p")
             assert app.day == day
             assert not isinstance(app.screen, ModalScreen)
-            # clicks on pts: most first, then fewest first, then stored order
-            # past the padding, the marker, the gap and done/
-            pts = 1 + 1 + 2 + 5 + 1
-            assert await pilot.click("#columns", offset=(pts, 0))
+            # clicks on dur/pt: least first, then most first, then stored order
+            # past the padding, the marker and the score
+            per_point = 1 + 1 + 2 + 10 + 3
+            assert await pilot.click("#columns", offset=(per_point, 0))
             assert shown() == [b.id, a.id, c.id]
-            assert await pilot.click("#columns", offset=(pts, 0))
+            assert await pilot.click("#columns", offset=(per_point, 0))
             assert shown() == [a.id, b.id, c.id]
-            assert await pilot.click("#columns", offset=(pts, 0))
+            assert await pilot.click("#columns", offset=(per_point, 0))
             assert shown() == [first.id, a.id, second.id, b.id, c.id]
             assert app.store.load(day.date) == day
 

@@ -263,13 +263,13 @@ Toast {
 }
 
 /* room for 23h59m and the cursor */
-#minutes {
+#task-fields #minutes {
     width: 9;
+    margin-right: 0;
 }
 
 #task-fields #title {
     width: 1fr;
-    margin-right: 0;
 }
 
 #schedule-dialog {

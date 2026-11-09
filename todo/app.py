@@ -104,7 +104,7 @@ class Column(NamedTuple):
 
 
 COLUMNS = (
-    Column("done", completion, False, ("least done first", "most done first")),
+    Column("score", completion, False, ("least done first", "most done first")),
     Column(
         "pts",
         lambda task: task.available,
@@ -118,13 +118,13 @@ COLUMNS = (
         ("shortest duration first", "longest duration first"),
     ),
     Column(
-        "w/pt",
+        "dur/pt",
         work_per_point,
         False,
-        ("least work per point first", "most work per point first"),
+        ("least duration per point first", "most duration per point first"),
     ),
 )
-DONE, POINTS, DURATION, PER_POINT = COLUMNS
+DONE, _, DURATION, PER_POINT = COLUMNS
 
 # a task row is the done marker, the score as earned/available, work per point, the
 # title, and the duration at the right edge; longer values get truncated
@@ -179,8 +179,10 @@ def row(
     table.add_column(width=1, no_wrap=True)
     cells: list[Text | str] = [marker]
     if shown.score:
-        table.add_column(width=2 + SCORE_WIDTH, justify="right", no_wrap=True)
-        cells.append(scored)
+        # left-justified, since right justification strips the padding that aligns
+        # the slashes
+        table.add_column(width=2 + SCORE_WIDTH, no_wrap=True)
+        cells.append(Text("  ") + scored)
     if shown.rate:
         table.add_column(width=GAP + RATE_WIDTH, justify="right", no_wrap=True)
         cells.append(per_point)
@@ -300,15 +302,13 @@ def next_sort(current: Sort | None, column: Column) -> Sort | None:
 
 
 def column_at(x: int, width: int, shown: Shown) -> Column | None:
-    """The column named at x in a header row width cells wide."""
+    """The column named at x in a header row width cells wide. Points sort only from
+    the menu, since the score column sorts by the share done."""
     start = 1
     if shown.score:
-        slash = start + 2 + EARNED_WIDTH
-        if start <= x < slash:
+        if start <= x < start + 2 + SCORE_WIDTH:
             return DONE
-        start = slash + 1 + AVAILABLE_WIDTH
-        if slash < x < start:
-            return POINTS
+        start += 2 + SCORE_WIDTH
     if shown.rate and start <= x < start + GAP + RATE_WIDTH:
         return PER_POINT
     if shown.duration and width - GAP - DURATION_WIDTH <= x < width:
@@ -326,10 +326,13 @@ def column_name(column: Column, sort: Sort | None) -> Text:
 def header_row(sort: Sort | None, shown: Shown) -> RenderableType:
     """The column names, with a rule below them while sorted, since the sorted view has
     no section rules."""
+    score_name = Text(" " * (EARNED_WIDTH - 2)) + column_name(DONE, sort)
+    # centred over the values' slash
+    score_name.align("left", SCORE_WIDTH)
     names = row(
         shown,
         Text(),
-        score_cell(column_name(DONE, sort), column_name(POINTS, sort)),
+        score_name,
         column_name(PER_POINT, sort),
         Text("title", style="dim"),
         column_name(DURATION, sort),
@@ -346,7 +349,7 @@ def section_share(section: Section, total: Fraction) -> str:
     _, available = score(section.tasks)
     if not available or available == total:
         return ""
-    return f"{percentage(available / total)}% of total"
+    return f"{percentage(available / total)}% of points"
 
 
 class SectionRule:
@@ -477,6 +480,10 @@ def schedule_row(plan: Day | Span) -> Text:
     return labelled(label, value, max(value_width(plan), value.cell_len))
 
 
+# a labelled value, or a note
+Figure = tuple[str, Text] | Text
+
+
 class Bar(NamedTuple):
     label: str
     value: Text
@@ -486,7 +493,7 @@ class Bar(NamedTuple):
 
 class Summary:
     """The stats above the task list: a bar each for time, points and work, the
-    figures derived from them in two columns, and the selected task's full title when
+    figures derived from them in columns, and the selected task's full title when
     the list truncates it, on a line that is otherwise blank. Rows without a value are
     left out. Unscored tasks' durations count as work that never gets done."""
 
@@ -504,7 +511,7 @@ class Summary:
         self.values = value_width(plan)
         self.bars = (
             Bar(
-                "time",
+                "elapsed",
                 duration(elapsed) + " / " + duration(scheduled),
                 Fraction(elapsed, scheduled),
                 "cyan",
@@ -512,7 +519,7 @@ class Summary:
             if scheduled
             else None,
             Bar(
-                "pts",
+                "points",
                 Text(f"{number(earned)} / {number(available)}"),
                 earned / available,
                 "green",
@@ -529,29 +536,37 @@ class Summary:
             else None,
         )
 
-        earned_row = pace_row = margin_row = None
+        progress_row = pace_row = free_row = None
         if scheduled and available:
-            # whole seconds, so pace equals earned minus elapsed as displayed
+            # whole seconds, so pace equals progress minus elapsed as displayed
             worth = int(scheduled * earned / available)
-            earned_row = ("earned", duration(worth))
+            progress_row = ("progress", duration(worth))
             pace_row = ("pace", pace(worth - elapsed))
         if scheduled and needed:
-            margin = (scheduled - needed) / scheduled
-            style = "yellow" if margin < 0 else ""
-            margin_row = ("margin", Text(f"{percentage(margin)}%", style=style))
-        self.left = (earned_row, pace_row, margin_row)
-
+            free = (scheduled - needed) / scheduled
+            style = "yellow" if free < 0 else ""
+            free_row = ("free", Text(f"{percentage(free)}%", style=style))
         missing = sum(t.minutes is None and t.available is not None for t in tasks)
-        self.right: tuple[tuple[str, Text] | Text | None, ...] = (
-            ("time/pt", rate(scheduled, available))
-            if scheduled and available
-            else None,
-            ("work/pt", rate(timed_needed, timed_available))
-            if timed_available
-            else None,
-            Text(f"{missing} scored without a duration", style="dim")
-            if needed and missing
-            else None,
+        # columns of two figures each; the first column's values end with the bars'
+        self.columns: tuple[tuple[Figure | None, Figure | None], ...] = (
+            (progress_row, pace_row),
+            (
+                (
+                    "sched/pt" if isinstance(plan, Day) else "span/pt",
+                    rate(scheduled, available),
+                )
+                if scheduled and available
+                else None,
+                ("dur/pt", rate(timed_needed, timed_available))
+                if timed_available
+                else None,
+            ),
+            (
+                free_row,
+                Text(f"{missing} scored, no duration", style="dim")
+                if needed and missing
+                else None,
+            ),
         )
         self.full_title = full_title
 
@@ -559,8 +574,9 @@ class Summary:
         self, console: Console, options: ConsoleOptions
     ) -> RenderResult:
         values = self.values
-        figures = LABEL_WIDTH + values
-        length = max(options.max_width - figures - 2 * GUTTER - SHARE_WIDTH, 1)
+        length = max(
+            options.max_width - LABEL_WIDTH - values - 2 * GUTTER - SHARE_WIDTH, 1
+        )
         bars = [bar for bar in self.bars if bar is not None]
         for bar in bars:
             filled = min(int(bar.progress * length), length)
@@ -572,23 +588,34 @@ class Summary:
             line.append("─" * (length - filled), "dim")
             line.append(f"{share:>{GUTTER + SHARE_WIDTH}}", bar.color)
             yield line
-        rows = [
-            (left, right) for left, right in zip(self.left, self.right) if left or right
+        widths = [values] + [
+            max(
+                (cell[1].cell_len for cell in column if isinstance(cell, tuple)),
+                default=0,
+            )
+            for column in self.columns[1:]
         ]
-        if bars and rows:
+        columns = [
+            (column, width)
+            for column, width in zip(self.columns, widths, strict=True)
+            if any(column)
+        ]
+        if bars and columns:
             yield Text()
-        right_values = max(
-            (cell[1].cell_len for cell in self.right if isinstance(cell, tuple)),
-            default=0,
-        )
-        for left, right in rows:
+        for row in range(2):
+            if not any(column[row] for column, _ in columns):
+                continue
             line = Text(no_wrap=True, overflow="ellipsis")
-            line.append_text(labelled(*left, values) if left else Text(" " * figures))
-            line.append(" " * GUTTER)
-            if isinstance(right, tuple):
-                line.append_text(labelled(*right, right_values))
-            elif right is not None:
-                line.append_text(right)
+            for index, (column, width) in enumerate(columns):
+                if index:
+                    line.append(" " * GUTTER)
+                cell = column[row]
+                if isinstance(cell, tuple):
+                    cell = labelled(*cell, width)
+                elif cell is None:
+                    cell = Text()
+                line.append_text(cell)
+                line.append(" " * (LABEL_WIDTH + width - cell.cell_len))
             line.rstrip()
             yield line
         yield Text(
@@ -656,14 +683,14 @@ HELP = (
         ),
     ),
     (
-        "Days and lists",
+        "Days and spans",
         (
-            ("tab", "switch between days and lists"),
-            ("[ ]", "previous or next day, or list"),
+            ("tab", "switch between days and spans"),
+            ("[ ]", "previous or next day, or span"),
             ("t", "today"),
-            ("T", "open a date, or the lists"),
+            ("T", "open a date, or the spans"),
             ("c", "replace this list with another's"),
-            ("@", "edit the schedule, or a list's title and time"),
+            ("@", "edit the schedule, or a span's title and time"),
         ),
     ),
     (
@@ -675,6 +702,23 @@ HELP = (
         ),
     ),
     ("App", (("?", "show this list"), ("q", "quit"))),
+)
+
+# in the order the terms appear on screen
+GLOSSARY = (
+    ("spans", "lists that cover a range of dates"),
+    ("elapsed", "scheduled time gone by"),
+    ("points", "points earned out of all points"),
+    ("work", "duration done, in proportion to points"),
+    ("progress", "points earned, as scheduled time"),
+    ("pace", "progress minus elapsed"),
+    ("sched/pt", "scheduled time per point"),
+    ("span/pt", "a span's time per point"),
+    ("dur/pt", "duration per point"),
+    ("free", "share of the schedule no duration fills"),
+    ("score", "points earned out of the task's points"),
+    ("✓ ~", "done, partly done"),
+    ("of points", "a section's share of the list's points"),
 )
 
 
@@ -840,7 +884,7 @@ class TaskPane(Vertical):
         if any(view.plan.tasks()):
             empty.update("all done · f shows them")
         else:
-            copied = "day's list" if isinstance(view.plan, Day) else "list's tasks"
+            copied = "day's list" if isinstance(view.plan, Day) else "span's tasks"
             empty.update(f"o  add tasks\nc  copy another {copied}")
         empty.display = not view.shown()
         self.query_one("#columns", Static).update(header_row(view.sort, shown))
@@ -956,6 +1000,13 @@ class TaskEditor(Form):
         with Vertical(classes="dialog", id="task-dialog"):
             yield Label(self.heading, classes="dialog-title", markup=False)
             with Horizontal(id="task-fields"):
+                yield Label("title")
+                yield Input(
+                    task.title if task else "",
+                    id="title",
+                    compact=True,
+                    select_on_focus=False,
+                )
                 yield Label("pts")
                 yield Input(
                     number(task.available)
@@ -972,13 +1023,6 @@ class TaskEditor(Form):
                     if task and task.minutes is not None
                     else "",
                     id="minutes",
-                    compact=True,
-                    select_on_focus=False,
-                )
-                yield Label("title")
-                yield Input(
-                    task.title if task else "",
-                    id="title",
                     compact=True,
                     select_on_focus=False,
                 )
@@ -1009,7 +1053,7 @@ class TaskEditor(Form):
             field.value = ""
         self.show("#error", "")
         self.show("#added", f"added {task.title}")
-        self.query_one("#available", Input).focus()
+        self.query_one("#title", Input).focus()
 
 
 def time_field(value: str, column: str) -> Input:
@@ -1249,6 +1293,11 @@ class HelpScreen(ModalScreen):
             for keys, description in rows:
                 text.append(f"\n{keys:<{width}}", style="bold blue")
                 text.append(description)
+        text.append("\n\nTerms", style="bold")
+        width = max(len(term) for term, _ in GLOSSARY) + 2
+        for term, meaning in GLOSSARY:
+            text.append(f"\n{term:<{width}}", style="bold")
+            text.append(meaning)
         with VimScroll(classes="dialog", id="help-dialog"):
             yield Static(text)
             yield bottom_row("", ("close", "screen.dismiss"))
@@ -1299,7 +1348,7 @@ class SpanEditor(Form):
 
         with Vertical(classes="dialog", id="span-dialog"):
             yield Label(
-                "New list" if span is None else "Edit list", classes="dialog-title"
+                "New span" if span is None else "Edit span", classes="dialog-title"
             )
             yield Static(
                 "dates like 2026-11-20; times like 07:30, or blank",
@@ -1390,9 +1439,9 @@ class ListPicker(ModalScreen):
 
     BINDINGS = [
         ("escape", "dismiss", "Close"),
-        Binding("o", "new", "New list", show=False),
-        Binding("x", "delete", "Delete list", show=False),
-        Binding("u", "restore", "Restore list", show=False),
+        Binding("o", "new", "New span", show=False),
+        Binding("x", "delete", "Delete span", show=False),
+        Binding("u", "restore", "Restore span", show=False),
     ]
 
     def __init__(
@@ -1412,13 +1461,13 @@ class ListPicker(ModalScreen):
         with Vertical(classes="dialog", id="picker-dialog"):
             if self.manager is None:
                 yield Label(
-                    "Replace this list's tasks with a copy of", classes="dialog-title"
+                    "Replace this span's tasks with a copy of", classes="dialog-title"
                 )
                 yield VimList(id="picker")
                 yield Static("", id="no-lists", classes="muted")
                 yield bottom_row("", ("cancel", "screen.dismiss"))
             else:
-                yield Label("Lists", classes="dialog-title")
+                yield Label("Spans", classes="dialog-title")
                 yield VimList(id="picker")
                 yield Static("no lists yet", id="no-lists", classes="muted")
                 yield bottom_row(
@@ -1479,7 +1528,7 @@ class ListPicker(ModalScreen):
             return
         restored = self.manager.restore()
         if restored is None:
-            self.app.notify("No deleted list to restore.", timeout=2)
+            self.app.notify("No deleted span to restore.", timeout=2)
             return
         self.show(restored, None)
 
@@ -1576,7 +1625,7 @@ class TodoApp(App):
             yield Static("", id="date-gap")
             yield LineButton("days", "app.show_mode('days')", id="days-mode")
             yield Static("·", id="mode-dot")
-            yield LineButton("lists", "app.show_mode('lists')", id="lists-mode")
+            yield LineButton("spans", "app.show_mode('lists')", id="lists-mode")
         with Vertical(id="summary"):
             yield LineButton("", "app.edit_time", id="schedule")
             yield Static("", id="totals")
@@ -1769,10 +1818,10 @@ class TodoApp(App):
         return tuple(items)
 
     def day_actions(self) -> tuple[MenuItem, ...]:
-        kind = "list" if self.lists else "day"
+        kind = "span" if self.lists else "day"
         return (
             MenuItem(
-                "T", "open a list" if self.lists else "open a date", self.action_choose
+                "T", "open a span" if self.lists else "open a date", self.action_choose
             ),
             MenuItem("c", f"copy a {kind}", self.action_copy),
             MenuItem(
@@ -1984,7 +2033,7 @@ class TodoApp(App):
                         span,
                         lambda title, start, end: self.save_change(
                             replace(span, title=title, start=start, end=end),
-                            "changed the list's title and time",
+                            "changed the span's title and time",
                         ),
                     )
                 )
@@ -2036,7 +2085,7 @@ class TodoApp(App):
 
             sources = tuple(s for s in self.store.spans() if s.id != open_id)
             if not sources:
-                self.notify("No other lists yet.")
+                self.notify("No other spans yet.")
                 return
             self.push_screen(ListPicker(sources, copy))
             return
