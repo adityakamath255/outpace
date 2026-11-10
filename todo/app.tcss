@@ -52,7 +52,7 @@ Screen {
 /* padded like the column names, to share the task list's edges */
 #summary {
     height: auto;
-    margin: 1 1 0 1;
+    margin: 1;
     padding: 0 2 0 1;
 }
 

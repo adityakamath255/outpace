@@ -581,12 +581,11 @@ class FigureColumn(NamedTuple):
 
 
 class Summary:
-    """The stats above the task list: a bar each for time, points and work, the
-    figures derived from them in columns, and the selected task's full title when
-    the list truncates it, on a line that is otherwise blank. Rows without a value are
-    left out. Unscored tasks' durations count as work that never gets done."""
+    """The stats above the task list: a bar each for time, points and work, and the
+    figures derived from them in columns. Rows without a value are left out. Unscored
+    tasks' durations count as work that never gets done."""
 
-    def __init__(self, plan: Day | Span, now: datetime, full_title: str | None):
+    def __init__(self, plan: Day | Span, now: datetime):
         tasks = tuple(plan.tasks())
         earned, available = score(tasks)
         elapsed, scheduled = time_progress(
@@ -659,7 +658,6 @@ class Summary:
                 else None,
             ),
         )
-        self.full_title = full_title
 
     def __rich_console__(
         self, console: Console, options: ConsoleOptions
@@ -716,9 +714,6 @@ class Summary:
                 line.append(" " * (start + column.width - line.cell_len))
             line.rstrip()
             yield line
-        yield Text(
-            self.full_title or "", style="bold", no_wrap=True, overflow="ellipsis"
-        )
 
 
 def plan_key(plan: Day | Span) -> date | str:
@@ -1877,22 +1872,7 @@ class TodoApp(App):
     def refresh_stats(self) -> None:
         if not self.is_running:
             return
-        full_title = None
-        _, task = self.selected()
-        if task is not None:
-            tasks = self.query_one("#tasks", VimList)
-            # option padding, one column on each side
-            width = tasks.scrollable_content_region.width - 2
-            room = width - Shown.of(self.plan.tasks()).fixed_width()
-            if Text(task.title).cell_len > room:
-                full_title = task.title
-        self.query_one("#totals", Static).update(
-            Summary(self.plan, datetime.now(), full_title)
-        )
-
-    @on(OptionList.OptionHighlighted, "#tasks")
-    def highlighted(self) -> None:
-        self.refresh_stats()
+        self.query_one("#totals", Static).update(Summary(self.plan, datetime.now()))
 
     @on(TaskList.MenuRequested)
     def open_row_menu(self, event: TaskList.MenuRequested) -> None:
@@ -2407,6 +2387,14 @@ class TodoApp(App):
         self.notify(f"{past}: {change.description}", timeout=4, markup=False)
 
 
+def date_argument(value: str) -> date:
+    # argparse shows its own message for a ValueError, but this one's
+    try:
+        return parse_date(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(str(error)) from None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="A daily task list with points and scheduled time."
@@ -2419,7 +2407,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--date",
-        type=parse_date,
+        type=date_argument,
         default=date.today(),
         help="list date, YYYY-MM-DD (default: today)",
     )

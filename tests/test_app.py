@@ -65,7 +65,7 @@ def summary_lines(day, now):
     output = StringIO()
     console = Console(file=output, width=78)
     console.print(schedule_row(day))
-    console.print(Summary(day, now, None))
+    console.print(Summary(day, now))
     return [" ".join(line.split()) for line in output.getvalue().splitlines()]
 
 
@@ -1006,7 +1006,9 @@ def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
     asyncio.run(sort())
 
 
-def test_command_line_rejects_dates_the_date_prompt_rejects(tmp_path, monkeypatch):
+def test_command_line_rejects_dates_the_date_prompt_rejects(
+    tmp_path, monkeypatch, capsys
+):
     database = tmp_path / "todo.sqlite3"
     monkeypatch.setattr(
         sys, "argv", ["todo", "--database", str(database), "--date", "20261102"]
@@ -1015,6 +1017,7 @@ def test_command_line_rejects_dates_the_date_prompt_rejects(tmp_path, monkeypatc
     with pytest.raises(SystemExit) as raised:
         main()
     assert raised.value.code == 2
+    assert "Use a date in YYYY-MM-DD format." in capsys.readouterr().err
 
 
 def test_f_hides_done_tasks_in_both_views_until_pressed_again(app):
