@@ -225,14 +225,14 @@ def test_a_span_counts_all_its_time_and_must_end_after_it_starts():
         replace(span, end=datetime(2026, 12, 1, 0, 0, 30))
 
 
-def test_report_matches_the_original_calculations():
-    earned, available = Fraction(18), Fraction(42)
-    elapsed, total = 12600, 37800
-    assert percentage(earned / available) == "42.85"
-    assert percentage(Fraction(elapsed, total)) == "33.33"
-    assert per_point(total, available) == 15 * 60
+def test_percentages_truncate_and_per_point_needs_points():
+    assert percentage(Fraction(18, 42)) == "42.85"
+    assert percentage(Fraction(12600, 37800)) == "33.33"
+    assert per_point(37800, Fraction(42)) == 15 * 60
     assert per_point(0, Fraction(0)) is None
-    # unscored tasks count toward neither
+
+
+def test_score_leaves_out_unscored_tasks():
     practice = Task("Practice", points("4"), points("0.75"))
     assert score((practice, Task("Note", None))) == (Fraction(3, 4), 4)
 

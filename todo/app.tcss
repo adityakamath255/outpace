@@ -31,17 +31,17 @@ Screen {
     width: 1fr;
 }
 
-#days-mode, #lists-mode {
+#days-mode, #spans-mode {
     padding: 0 1;
     color: $muted;
 }
 
-#days-mode.mode-on, #lists-mode.mode-on {
+#days-mode.mode-on, #spans-mode.mode-on {
     color: $foreground;
     text-style: bold;
 }
 
-#days-mode:hover, #lists-mode:hover {
+#days-mode:hover, #spans-mode:hover {
     background: $surface1;
 }
 
@@ -282,7 +282,7 @@ Toast {
     width: 80;
 }
 
-#no-lists {
+#no-spans {
     height: auto;
 }
 

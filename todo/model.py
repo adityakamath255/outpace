@@ -377,9 +377,9 @@ class Span(Plan):
         check_sections(self.sections)
         moments = (self.start, self.end)
         if any(m.tzinfo or m.second or m.microsecond for m in moments):
-            raise ValueError("A list's start and end are local times to the minute.")
+            raise ValueError("A span's start and end are local times to the minute.")
         if self.end <= self.start:
-            raise ValueError("A list must end after it starts.")
+            raise ValueError("A span must end after it starts.")
 
     def with_sections(self, sections: tuple[Section, ...]) -> Self:
         return replace(self, sections=sections)

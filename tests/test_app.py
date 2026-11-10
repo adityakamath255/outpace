@@ -14,11 +14,11 @@ from textual.widgets import Footer, Input, Static
 from todo.app import (
     COLUMNS,
     LineButton,
-    ListPicker,
     RowMenu,
     ScheduleEditor,
     SectionRule,
     Sort,
+    SpanPicker,
     Summary,
     TodoApp,
     VimList,
@@ -1067,7 +1067,7 @@ def week(title="week", start=datetime(2026, 11, 2), earned="0"):
     return Span(title, start, start + timedelta(days=7), (Section("", (task,)),))
 
 
-def test_days_and_lists_keep_their_own_list_history_and_progress(app):
+def test_days_and_spans_keep_their_own_list_history_and_progress(app):
     span = week()
     app.store.save(span)
     day = app.day
@@ -1077,7 +1077,7 @@ def test_days_and_lists_keep_their_own_list_history_and_progress(app):
             # x keeps the day's task to put, progress and all
             await pilot.press("x")
             await pilot.press("tab")
-            assert app.lists and app.plan == span
+            assert app.showing_spans and app.plan == span
             await pilot.press("plus")
             assert app.store.spans()[0].sections[0].tasks[0].earned == 1
             # progress belongs to the list it was made on
@@ -1090,7 +1090,7 @@ def test_days_and_lists_keep_their_own_list_history_and_progress(app):
             assert app.plan == span
             # back to days, whose deletion is still its own to undo
             await pilot.press("tab")
-            assert not app.lists
+            assert not app.showing_spans
             await pilot.press("u")
             assert app.day == day
             await pilot.press("tab")
@@ -1099,14 +1099,14 @@ def test_days_and_lists_keep_their_own_list_history_and_progress(app):
     asyncio.run(switch())
 
 
-def test_a_new_list_takes_whole_dates_and_at_edits_its_time(app):
+def test_a_new_span_takes_whole_dates_and_at_edits_its_time(app):
     def fill(**values):
         for selector, value in values.items():
             app.screen.query_one(f"#{selector}", Input).value = value
 
     async def create():
         async with app.run_test(size=(120, 35)) as pilot:
-            # with no lists yet, lists mode starts with a new one
+            # with no spans yet, spans mode starts with a new one
             await pilot.press("tab")
             fill(**{"span-title": "november", "from-date": "2026-11-06"})
             fill(**{"to-date": "2026-11-31"})
@@ -1116,7 +1116,7 @@ def test_a_new_list_takes_whole_dates_and_at_edits_its_time(app):
             fill(**{"to-date": "2026-11-30"})
             await pilot.press("enter")
             created = app.plan
-            assert app.lists and created.title == "november"
+            assert app.showing_spans and created.title == "november"
             assert (created.start, created.end) == (
                 datetime(2026, 11, 6),
                 datetime(2026, 12, 1),
@@ -1131,7 +1131,7 @@ def test_a_new_list_takes_whole_dates_and_at_edits_its_time(app):
     asyncio.run(create())
 
 
-def test_the_picker_deletes_lists_moving_on_and_restores_them(app):
+def test_the_picker_deletes_spans_moving_on_and_restores_them(app):
     first, second = week("first"), week("second", datetime(2026, 11, 9))
     app.store.save(first)
     app.store.save(second)
@@ -1142,17 +1142,17 @@ def test_the_picker_deletes_lists_moving_on_and_restores_them(app):
             app.open_span(first)
             await pilot.press("T")
             picker = app.screen
-            assert isinstance(picker, ListPicker)
+            assert isinstance(picker, SpanPicker)
             # latest to start first, with the open list selected
             assert [s.title for s in picker.spans] == ["second", "first"]
             assert picker.query_one("#picker", VimList).highlighted == 1
             await pilot.press("x")
             assert app.plan == second
             await pilot.press("x")
-            assert not app.lists and app.store.spans() == ()
+            assert not app.showing_spans and app.store.spans() == ()
             await pilot.press("u")
             assert app.store.spans() == (second,)
             await pilot.press("enter")
-            assert app.lists and app.plan == second
+            assert app.showing_spans and app.plan == second
 
     asyncio.run(delete())

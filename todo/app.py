@@ -243,7 +243,8 @@ def row(
 
 
 def score_cell(earned: Text, available: Text) -> Text:
-    """earned/available, aligned on the slash. Changes both arguments."""
+    """earned/available, aligned on the slash."""
+    earned, available = earned.copy(), available.copy()
     earned.align("right", EARNED_WIDTH)
     available.align("left", AVAILABLE_WIDTH)
     return Text.assemble(earned, ("/", MUTED), available)
@@ -473,7 +474,7 @@ def moment(value: datetime) -> str:
 
 
 def span_text(span: Span) -> str:
-    return f"{moment(span.start)} – {moment(span.end)}"
+    return f"{moment(span.start)} - {moment(span.end)}"
 
 
 def widest(seconds: int) -> int:
@@ -547,10 +548,12 @@ def schedule_row(plan: Day | Span) -> Text:
 
 
 def progress_bar(progress: Fraction, color: str, length: int) -> Text:
-    """progress, to the half cell below, at the middle of a one-cell gap between the
-    fill and the track; full only at 100%. A glyph has one colour, so a cell can't end
-    the fill and start the track. Two halves make one cell even when a cell's width in
-    pixels is odd, so the gap is the same width wherever it falls."""
+    """length cells showing progress, rounded down to the half cell, so the bar is full
+    only at 100%.
+
+    A glyph has one colour, so a one-cell gap separates the fill from the track, with
+    the value at its middle. On a cell boundary the gap is two half cells, which add
+    up to one cell even when a cell is an odd number of pixels wide."""
     middle = min(int(progress * length * 2), length * 2)
     if middle == 0:
         return Text("─" * length, style=RULE)
@@ -785,7 +788,7 @@ HELP = (
 
 # in the order the terms appear on screen
 GLOSSARY = (
-    ("spans", "lists that cover a range of dates"),
+    ("spans", "lists that cover a stretch of time"),
     ("elapsed", "scheduled time gone by"),
     ("points", "points earned out of all points"),
     ("work", "duration done, in proportion to points"),
@@ -837,7 +840,7 @@ class TaskList(VimList):
 
     # Screen binds tab to focus_next, which runs before app bindings, and a priority
     # binding would also catch tab in dialogs
-    BINDINGS = [Binding("tab", "app.toggle_lists", "Days or lists", show=False)]
+    BINDINGS = [Binding("tab", "app.toggle_mode", "Days or spans", show=False)]
 
     class MenuRequested(Message):
         def __init__(self, screen_offset: Offset):
@@ -1291,8 +1294,8 @@ class ScheduleEditor(Form):
         row.query_one(".start", Input).focus()
 
     def action_move(self, offset: int) -> None:
-        """Moves focus to the same column in the row above or below. Below the last row
-        is the add line."""
+        """Moves focus a row up or down, keeping its column. Below the last row is the
+        add line."""
         rows = list(self.query(".interval").results(Horizontal))
         add = self.query_one(AddLine)
         if self.focused is add:
@@ -1313,8 +1316,8 @@ class ScheduleEditor(Form):
         return ".end" if focused is not None and focused.has_class("end") else ".start"
 
     async def action_remove_row(self) -> None:
-        """Removes the focused row. Focus moves to the same column in the next row, else
-        the previous row, else the add line."""
+        """Removes the focused row. Focus goes to the same column of a neighbouring row,
+        or to the add line when no row is left."""
         current = self.focused_row()
         if current is None:
             return
@@ -1526,7 +1529,7 @@ def picker_lines(spans: tuple[Span, ...], now: datetime) -> list[Text]:
     return lines
 
 
-class ListManager(NamedTuple):
+class SpanManager(NamedTuple):
     """Callbacks the picker uses. delete and restore return the remaining spans, or None
     from restore if nothing was deleted."""
 
@@ -1535,9 +1538,9 @@ class ListManager(NamedTuple):
     restore: Callable[[], tuple[Span, ...] | None]
 
 
-class ListPicker(ModalScreen):
-    """The span lists, latest start first. Choosing one calls on_choose. With a manager,
-    the picker can also add lists and delete and restore them."""
+class SpanPicker(ModalScreen):
+    """The spans, latest start first. Choosing one calls on_choose. With a manager, the
+    picker can also add spans and delete and restore them."""
 
     BINDINGS = [
         ("escape", "dismiss", "Close"),
@@ -1550,7 +1553,7 @@ class ListPicker(ModalScreen):
         self,
         spans: tuple[Span, ...],
         on_choose: Callable[[Span], object],
-        manager: ListManager | None = None,
+        manager: SpanManager | None = None,
         selected: str | None = None,
     ):
         super().__init__()
@@ -1566,12 +1569,12 @@ class ListPicker(ModalScreen):
                     "Replace this span's tasks with a copy of", classes="dialog-title"
                 )
                 yield VimList(id="picker")
-                yield Static("", id="no-lists", classes="muted")
+                yield Static("", id="no-spans", classes="muted")
                 yield bottom_row("", ("cancel", "screen.dismiss"))
             else:
                 yield Label("Spans", classes="dialog-title")
                 yield VimList(id="picker")
-                yield Static("no lists yet", id="no-lists", classes="muted")
+                yield Static("no spans yet", id="no-spans", classes="muted")
                 yield bottom_row(
                     "",
                     ("new", "screen.new"),
@@ -1596,7 +1599,7 @@ class ListPicker(ModalScreen):
                 else min(old_index, len(self.spans) - 1)
             )
         picker.display = bool(self.spans)
-        self.query_one("#no-lists").display = not self.spans
+        self.query_one("#no-spans").display = not self.spans
         # the list lost focus while hidden
         if self.spans:
             picker.focus()
@@ -1655,7 +1658,7 @@ class TodoApp(App):
         Binding("ctrl+r", "redo", "redo", show=False),
         # check_action picks which one shows
         Binding("@", "edit_time('days')", "schedule"),
-        Binding("@", "edit_time('lists')", "span"),
+        Binding("@", "edit_time('spans')", "span"),
         Binding("question_mark", "help", "keys"),
         Binding("c", "copy", "copy", show=False),
         Binding("s", "sort", "sort", show=False),
@@ -1686,17 +1689,17 @@ class TodoApp(App):
         # session-wide, not saved
         self.sort: Sort | None = None
         self.hide_done = False
-        # lists is True only while span is set
+        # showing_spans is True only while span is set
         self.day = store.load(list_date)
         self.span: Span | None = None
-        self.lists = False
+        self.showing_spans = False
 
     @property
     def plan(self) -> Day | Span:
-        if not self.lists:
+        if not self.showing_spans:
             return self.day
         if self.span is None:
-            raise RuntimeError("lists mode always has a span")
+            raise RuntimeError("spans mode always has a span")
         return self.span
 
     def set_plan(self, plan: Day | Span) -> None:
@@ -1708,7 +1711,7 @@ class TodoApp(App):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
         if action == "edit_time" and parameters:
-            return parameters[0] == ("lists" if self.lists else "days")
+            return parameters[0] == ("spans" if self.showing_spans else "days")
         return True
 
     def on_notify(self) -> None:
@@ -1730,7 +1733,7 @@ class TodoApp(App):
             yield Static("", id="date-gap")
             yield LineButton("days", "app.show_mode('days')", id="days-mode")
             yield Static("·", id="mode-dot")
-            yield LineButton("spans", "app.show_mode('lists')", id="lists-mode")
+            yield LineButton("spans", "app.show_mode('spans')", id="spans-mode")
         with Vertical(id="summary"):
             yield LineButton("", "app.edit_time", id="schedule")
             yield Static("", id="totals")
@@ -1743,7 +1746,7 @@ class TodoApp(App):
         self.query_one("#tasks", VimList).focus()
 
     def action_choose(self) -> None:
-        if self.lists:
+        if self.showing_spans:
             self.open_picker()
         else:
             self.choose_day()
@@ -1761,7 +1764,7 @@ class TodoApp(App):
         )
 
     def action_shift(self, offset: int) -> None:
-        if self.lists:
+        if self.showing_spans:
             spans = self.store.spans()
             index = [plan_key(s) for s in spans].index(plan_key(self.plan)) + offset
             if 0 <= index < len(spans):
@@ -1774,7 +1777,7 @@ class TodoApp(App):
         self.navigate_day(target)
 
     def action_today(self) -> None:
-        if self.lists:
+        if self.showing_spans:
             self.action_show_mode("days")
         self.navigate_day(date.today())
 
@@ -1831,8 +1834,8 @@ class TodoApp(App):
         self.query_one("#today").display = (
             isinstance(plan, Day) and plan.date != date.today()
         )
-        self.query_one("#days-mode").set_class(not self.lists, "mode-on")
-        self.query_one("#lists-mode").set_class(self.lists, "mode-on")
+        self.query_one("#days-mode").set_class(not self.showing_spans, "mode-on")
+        self.query_one("#spans-mode").set_class(self.showing_spans, "mode-on")
         self.refresh_bindings()
         hidden = self.query_one("#hidden", LineButton)
         hidden.display = self.hide_done
@@ -1902,10 +1905,12 @@ class TodoApp(App):
         return tuple(items)
 
     def day_actions(self) -> tuple[MenuItem, ...]:
-        kind = "span" if self.lists else "day"
+        kind = "span" if self.showing_spans else "day"
         return (
             MenuItem(
-                "T", "open a span" if self.lists else "open a date", self.action_choose
+                "T",
+                "open a span" if self.showing_spans else "open a date",
+                self.action_choose,
             ),
             MenuItem("c", f"copy a {kind}", self.action_copy),
             MenuItem(
@@ -2005,7 +2010,7 @@ class TodoApp(App):
         self.push_screen(Prompt("New section", "", "add", "blank for untitled", create))
 
     def action_copy(self) -> None:
-        if self.lists:
+        if self.showing_spans:
             self.open_picker(copying=True)
         else:
             self.copy_day()
@@ -2014,10 +2019,10 @@ class TodoApp(App):
         try:
             sources = tuple(d for d in self.store.list_dates() if d != self.day.date)
         except RECOVERABLE as error:
-            self.notify(str(error), title="Could not open lists", severity="error")
+            self.notify(str(error), title="Could not read saved days", severity="error")
             return
         if not sources:
-            self.notify("No other saved lists yet.")
+            self.notify("No other saved days yet.")
             return
         latest = next((d for d in sources if d < self.day.date), sources[0])
 
@@ -2122,22 +2127,22 @@ class TodoApp(App):
                     )
                 )
 
-    def action_toggle_lists(self) -> None:
-        self.action_show_mode("days" if self.lists else "lists")
+    def action_toggle_mode(self) -> None:
+        self.action_show_mode("days" if self.showing_spans else "spans")
 
     def action_show_mode(self, mode: str) -> None:
         if mode == "days":
-            self.lists = False
+            self.showing_spans = False
             self.redraw(self.current_view().first_row())
             return
-        if self.lists:
+        if self.showing_spans:
             return
         if self.span is not None:
             self.open_span(self.span)
             return
         spans = self.store.spans()
         if not spans:
-            self.new_list()
+            self.new_span()
             return
         now = datetime.now()
         current = [s for s in spans if s.start <= now < s.end]
@@ -2145,10 +2150,10 @@ class TodoApp(App):
 
     def open_span(self, span: Span) -> None:
         self.span = span
-        self.lists = True
+        self.showing_spans = True
         self.redraw(self.current_view().first_row())
 
-    def new_list(self) -> None:
+    def new_span(self) -> None:
         def create(title: str, start: datetime, end: datetime) -> None:
             span = Span(title, start, end, (Section(""),))
             self.store.save(span)
@@ -2171,12 +2176,12 @@ class TodoApp(App):
             if not sources:
                 self.notify("No other spans yet.")
                 return
-            self.push_screen(ListPicker(sources, copy))
+            self.push_screen(SpanPicker(sources, copy))
             return
-        manager = ListManager(self.new_list, self.delete_span, self.restore_span)
+        manager = SpanManager(self.new_span, self.delete_span, self.restore_span)
         selected = self.span.id if self.span is not None else None
         self.push_screen(
-            ListPicker(self.store.spans(), self.open_span, manager, selected)
+            SpanPicker(self.store.spans(), self.open_span, manager, selected)
         )
 
     def delete_span(self, span: Span) -> tuple[Span, ...]:
@@ -2189,7 +2194,7 @@ class TodoApp(App):
         if self.span is not None and self.span.id == span.id:
             neighbours = left[index : index + 1] or left[index - 1 : index]
             self.span = neighbours[0] if neighbours else None
-            self.lists = self.lists and self.span is not None
+            self.showing_spans = self.showing_spans and self.span is not None
             self.redraw(self.current_view().first_row())
         return left
 
@@ -2288,9 +2293,7 @@ class TodoApp(App):
             )
 
     def action_jump_section(self, offset: Literal[-1, 1]) -> None:
-        """Vim's paragraph motions over rules. } goes to the next rule, or from the last
-        section to its last row. { goes to this section's rule, or from a rule to the
-        previous one."""
+        """Vim's paragraph motions, with section rules as the blank lines."""
         if self.refuse_while_sorted("jump between sections"):
             return
         section, task = self.selected()
