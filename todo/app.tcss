@@ -147,9 +147,10 @@ FooterKey > .footer-key--description {
     background: $background;
 }
 
+/* transparent, to keep the list visible around the dialog */
 ModalScreen {
     align: center middle;
-    background: $background;
+    background: transparent;
 }
 
 .dialog {
@@ -217,10 +218,8 @@ ModalScreen {
     text-style: bold;
 }
 
-/* transparent, to keep the list visible around the menu */
 RowMenu {
     align: left top;
-    background: transparent;
 }
 
 #row-menu, #row-menu:focus {
@@ -337,6 +336,34 @@ Toast {
 /* docked, to keep close visible while the keys scroll */
 #help-dialog .bottom-row {
     dock: bottom;
+}
+
+#help-columns {
+    width: auto;
+    height: auto;
+    layout: vertical;
+}
+
+#help-columns > Static {
+    width: auto;
+}
+
+#help-right {
+    margin-top: 1;
+}
+
+HelpScreen.-wide #help-columns {
+    layout: horizontal;
+}
+
+/* the two columns, their gap, the padding and the border */
+HelpScreen.-wide #help-dialog {
+    width: 117;
+    max-width: 100%;
+}
+
+HelpScreen.-wide #help-right {
+    margin: 0 0 0 4;
 }
 
 #intervals {

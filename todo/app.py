@@ -753,53 +753,58 @@ def progress_change(before: Task, after: Task) -> str:
     )
 
 
-# keys use Textual's key displays so tests can check every binding is listed
+# keys use Textual's key displays so tests can check every binding is listed.
+# Two columns side by side at wide sizes, stacked otherwise; the terms end the second.
 HELP = (
     (
-        "Tasks and sections",
         (
-            ("j ↓", "next row"),
-            ("k ↑", "previous row"),
-            ("} {", "next or previous section"),
-            ("^d ^u", "half a page down or up"),
-            ("g", "first row"),
-            ("G", "last row"),
-            ("⏎", "set earned points"),
-            ("space", "toggle done"),
-            ("+ -", "earned points up or down by one"),
-            ("o", "add tasks below; on a section's rule, at its top"),
-            ("O", "add tasks above"),
-            ("#", "new section below this one"),
-            ("e", "edit task, or rename section"),
-            ("x del", "delete task, or section with its tasks"),
-            ("p P", "put the last deleted row below or above"),
-            ("J K", "move down or up, across sections"),
-            ("f", "hide or show done tasks"),
-            ("s", "sort across sections; or click a column name"),
-            ("u", "undo, kept per day until you quit"),
-            ("^r", "redo; any new change clears it"),
+            "Tasks and sections",
+            (
+                ("j ↓", "next row"),
+                ("k ↑", "previous row"),
+                ("} {", "next or previous section"),
+                ("^d ^u", "half a page down or up"),
+                ("g", "first row"),
+                ("G", "last row"),
+                ("⏎", "set earned points"),
+                ("space", "toggle done"),
+                ("+ -", "earned points up or down by one"),
+                ("o", "add tasks below; on a section's rule, at its top"),
+                ("O", "add tasks above"),
+                ("#", "new section below this one"),
+                ("e", "edit task, or rename section"),
+                ("x del", "delete task, or section with its tasks"),
+                ("p P", "put the last deleted row below or above"),
+                ("J K", "move down or up, across sections"),
+                ("f", "hide or show done tasks"),
+                ("s", "sort across sections; or click a column name"),
+                ("u", "undo, kept per day until you quit"),
+                ("^r", "redo; any new change clears it"),
+            ),
+        ),
+        (
+            "Dialogs",
+            (
+                ("⏎", "save"),
+                ("esc", "cancel"),
+                ("tab", "next field"),
+            ),
         ),
     ),
     (
-        "Days and spans",
         (
-            ("tab", "switch between days and spans"),
-            ("[ ]", "previous or next day, or span"),
-            ("t", "today"),
-            ("T", "open a date, or the spans"),
-            ("c", "replace this list with another's"),
-            ("@", "edit the schedule, or a span's title and time"),
+            "Days and spans",
+            (
+                ("tab", "switch between days and spans"),
+                ("[ ]", "previous or next day, or span"),
+                ("t", "today"),
+                ("T", "open a date, or the spans"),
+                ("c", "replace this list with another's"),
+                ("@", "edit the schedule, or a span's title and time"),
+            ),
         ),
+        ("App", (("?", "show this list"), ("q", "quit"))),
     ),
-    (
-        "Dialogs",
-        (
-            ("⏎", "save"),
-            ("esc", "cancel"),
-            ("tab", "next field"),
-        ),
-    ),
-    ("App", (("?", "show this list"), ("q", "quit"))),
 )
 
 # in the order the terms appear on screen
@@ -991,8 +996,10 @@ class TaskPane(Vertical):
                     f"  copy another {copied}",
                 )
             )
-        empty.display = not view.shown()
-        self.query_one("#columns", Static).update(header_row(view.sort, shown))
+        columns = self.query_one("#columns", Static)
+        columns.update(header_row(view.sort, shown))
+        columns.display = bool(view.shown())
+        empty.display = not columns.display
 
 
 class VimScroll(VerticalScroll):
@@ -1393,24 +1400,32 @@ class HelpScreen(ModalScreen):
     BINDINGS = [
         Binding("escape,question_mark,q", "dismiss", "Close"),
     ]
+    # the two columns fit side by side from here
+    HORIZONTAL_BREAKPOINTS = [(120, "-wide")]
 
     def compose(self) -> ComposeResult:
-        text = Text()
-        width = max(len(keys) for _, rows in HELP for keys, _ in rows) + 2
-        for index, (group, rows) in enumerate(HELP):
-            if index:
-                text.append("\n\n")
-            text.append(group, style="bold")
-            for keys, description in rows:
-                text.append(f"\n{keys:<{width}}", style=KEY)
-                text.append(description)
-        text.append("\n\nTerms", style="bold")
-        width = max(len(term) for term, _ in GLOSSARY) + 2
+        key_width = (
+            max(len(keys) for column in HELP for _, rows in column for keys, _ in rows)
+            + 2
+        )
+        left, right = Text(), Text()
+        for text, column in zip((left, right), HELP, strict=True):
+            for index, (group, rows) in enumerate(column):
+                if index:
+                    text.append("\n\n")
+                text.append(group, style="bold")
+                for keys, description in rows:
+                    text.append(f"\n{keys:<{key_width}}", style=KEY)
+                    text.append(description)
+        right.append("\n\nTerms", style="bold")
+        term_width = max(len(term) for term, _ in GLOSSARY) + 2
         for term, meaning in GLOSSARY:
-            text.append(f"\n{term:<{width}}", style="bold")
-            text.append(meaning)
+            right.append(f"\n{term:<{term_width}}", style="bold")
+            right.append(meaning)
         with VimScroll(classes="dialog", id="help-dialog"):
-            yield Static(text)
+            with Horizontal(id="help-columns"):
+                yield Static(left)
+                yield Static(right, id="help-right")
             yield bottom_row("", ("close", "screen.dismiss"))
 
 

@@ -337,10 +337,28 @@ def test_plus_and_minus_step_points_and_undo_names_the_change(app, monkeypatch):
     asyncio.run(step())
 
 
+def test_help_fits_without_scrolling_at_120_by_35(app):
+    async def open_help():
+        async with app.run_test(size=(120, 35)) as pilot:
+            await pilot.press("question_mark")
+            await pilot.pause()
+            dialog = app.screen.query_one("#help-dialog")
+            assert dialog.max_scroll_x == 0
+            assert dialog.max_scroll_y == 0
+
+    asyncio.run(open_help())
+
+
 def test_help_lists_every_key_binding(app):
     from todo.app import HELP, TaskList
 
-    documented = {key for _, rows in HELP for keys, _ in rows for key in keys.split()}
+    documented = {
+        key
+        for column in HELP
+        for _, rows in column
+        for keys, _ in rows
+        for key in keys.split()
+    }
     bindings = [*TodoApp.BINDINGS, *VimList.BINDINGS, *TaskList.BINDINGS]
     displays = {
         app.get_key_display(binding.with_key(key))
@@ -1031,6 +1049,7 @@ def test_f_hides_done_tasks_in_both_views_until_pressed_again(app):
             await pilot.press("space")
             assert shown() == [a.id, b.id]
             assert app.query_one("#empty").display
+            assert not app.query_one("#columns").display
             await pilot.press("f")
             assert len(shown()) == 6
             assert not app.query_one("#hidden").display
