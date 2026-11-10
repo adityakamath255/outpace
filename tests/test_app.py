@@ -18,12 +18,12 @@ from todo.app import (
     RowMenu,
     ScheduleEditor,
     SectionRule,
-    Shown,
     Sort,
     Summary,
     TodoApp,
     VimList,
     arrange,
+    drawn_slots,
     duration,
     header_row,
     main,
@@ -423,14 +423,16 @@ def test_pace_compares_whole_seconds():
 def test_the_table_leaves_out_columns_no_task_has_a_value_for():
     unscored = (Task("a", None), Task("b", None, minutes=30))
     output = StringIO()
-    Console(file=output, width=80).print(header_row(None, Shown.of(unscored)))
+    Console(file=output, width=80).print(header_row(None, drawn_slots(unscored)))
     assert output.getvalue().split() == ["dur", "title"]
 
 
 def test_subtotal_shows_how_much_of_its_section_is_done():
     section = Section("", (Task("A", points("4"), points("1")), Task("B", points("4"))))
     output = StringIO()
-    Console(file=output, width=80).print(subtotal_row(section, Shown.of(section.tasks)))
+    Console(file=output, width=80).print(
+        subtotal_row(section, drawn_slots(section.tasks))
+    )
     assert "subtotal  12.50%" in output.getvalue()
 
 
