@@ -1,6 +1,6 @@
 Screen {
-    background: ansi_default;
-    color: ansi_default;
+    background: $background;
+    color: $foreground;
 }
 
 /* no left margin: the arrows' padding is the line's left edge. The right padding
@@ -16,10 +16,11 @@ Screen {
 
 .link {
     padding: 0 1;
+    color: $blue;
 }
 
 .link:hover {
-    background: ansi_black;
+    background: $surface1;
 }
 
 #hidden {
@@ -32,19 +33,20 @@ Screen {
 
 #days-mode, #lists-mode {
     padding: 0 1;
-    text-style: dim;
+    color: $muted;
 }
 
 #days-mode.mode-on, #lists-mode.mode-on {
+    color: $foreground;
     text-style: bold;
 }
 
 #days-mode:hover, #lists-mode:hover {
-    background: ansi_black;
+    background: $surface1;
 }
 
 #mode-dot {
-    text-style: dim;
+    color: $muted;
 }
 
 /* padded like the column names, to share the task list's edges */
@@ -74,17 +76,19 @@ VimList {
     height: auto;
     max-height: 100%;
     border: none;
-    background: ansi_default;
+    background: $background;
     padding: 0;
     /* no horizontal scrollbar; titles truncate instead */
     scrollbar-size: 0 1;
     scrollbar-gutter: stable;
-    scrollbar-background: ansi_default;
-    scrollbar-color: ansi_black;
+    scrollbar-background: $background;
+    scrollbar-color: $surface2;
 }
 
+/* textual tints a focused OptionList */
 VimList:focus {
     border: none;
+    background-tint: transparent;
 }
 
 VimList > .option-list--option {
@@ -92,8 +96,8 @@ VimList > .option-list--option {
 }
 
 VimList > .option-list--option-highlighted {
-    background: ansi_black;
-    color: ansi_default;
+    background: $foreground 10%;
+    color: $foreground;
     text-style: none;
 }
 
@@ -103,17 +107,16 @@ VimList:focus > .option-list--option-highlighted {
 
 /* subtotal rows are disabled options, styled like enabled ones */
 VimList > .option-list--option-disabled {
-    color: ansi_default;
+    color: $foreground;
 }
 
 VimList > .option-list--option-hover {
-    background: ansi_black;
+    background: $foreground 10%;
 }
 
 #empty {
     height: auto;
     padding: 1 1 0 1;
-    color: ansi_blue;
 }
 
 /* auto width keeps the hover background inside the values */
@@ -123,7 +126,7 @@ VimList > .option-list--option-hover {
 }
 
 #schedule:hover {
-    background: ansi_black;
+    background: $surface1;
 }
 
 #totals {
@@ -131,22 +134,22 @@ VimList > .option-list--option-hover {
 }
 
 Footer {
-    background: ansi_default;
+    background: $background;
 }
 
 FooterKey > .footer-key--key {
-    color: ansi_blue;
-    background: ansi_default;
+    color: $blue;
+    background: $background;
 }
 
 FooterKey > .footer-key--description {
-    color: ansi_default;
-    background: ansi_default;
+    color: $foreground;
+    background: $background;
 }
 
 ModalScreen {
     align: center middle;
-    background: ansi_default;
+    background: $background;
 }
 
 .dialog {
@@ -154,12 +157,12 @@ ModalScreen {
     max-width: 95%;
     height: auto;
     max-height: 95%;
-    border: round ansi_blue;
+    border: round $lavender;
     padding: 1 2;
-    background: ansi_default;
+    background: $background;
     scrollbar-size: 1 1;
-    scrollbar-background: ansi_default;
-    scrollbar-color: ansi_black;
+    scrollbar-background: $background;
+    scrollbar-color: $surface2;
 }
 
 .dialog-title {
@@ -172,8 +175,8 @@ ModalScreen {
     height: 1;
     border: none;
     padding: 0 1;
-    background: ansi_black;
-    color: ansi_default;
+    background: $surface0;
+    color: $foreground;
 }
 
 .dialog Input:focus {
@@ -181,8 +184,7 @@ ModalScreen {
 }
 
 .muted {
-    color: ansi_default;
-    text-style: dim;
+    color: $muted;
 }
 
 #error, #added {
@@ -192,7 +194,7 @@ ModalScreen {
 }
 
 #error {
-    color: ansi_red;
+    color: $error;
 }
 
 .bottom-row {
@@ -208,7 +210,7 @@ ModalScreen {
     width: auto;
     margin-left: 2;
     padding: 0 1;
-    background: ansi_black;
+    background: $surface1;
 }
 
 .button:hover {
@@ -222,11 +224,12 @@ RowMenu {
 }
 
 #row-menu, #row-menu:focus {
-    border: round ansi_blue;
+    border: round $lavender;
     scrollbar-gutter: auto;
 }
 
 Toast {
+    background: $surface1;
     width: auto;
     max-width: 90%;
     margin-top: 0;
@@ -250,7 +253,7 @@ Toast {
 #task-fields Label {
     width: auto;
     margin: 0 1 0 0;
-    text-style: dim;
+    color: $label;
 }
 
 #task-fields Input {
@@ -296,7 +299,7 @@ Toast {
 .span-row Label {
     width: 5;
     margin-right: 1;
-    text-style: dim;
+    color: $label;
 }
 
 .span-row #to-label {
@@ -369,10 +372,19 @@ Toast {
     width: auto;
     margin-right: 2;
     padding: 0 1;
-    text-style: dim;
+    color: $muted;
 }
 
 .row-action:hover, .row-action:focus {
-    background: ansi_black;
+    background: $surface1;
+    color: $foreground;
     text-style: bold;
+}
+
+Toast.-information {
+    border-left: outer $information;
+}
+
+Toast.-information .toast--title {
+    color: $information;
 }

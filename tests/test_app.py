@@ -387,7 +387,7 @@ def test_stats_compare_time_with_work():
         "sched/pt 1h",
         "dur/pt 1h6m",
         "progress 5h",
-        "pace ahead 3h",
+        "pace +3h",
         "free -10.00%",
     ):
         assert row in text
@@ -399,14 +399,14 @@ def test_pace_compares_whole_seconds():
     day = Day(date(2026, 11, 1), written("08:00-18:00"), (Section("", (task,)),))
     # earned is 54m32.7s; time is 54m32s
     lines = summary_lines(day, datetime(2026, 11, 1, 8, 54, 32))
-    assert any(line.startswith("pace on pace") for line in lines)
+    assert any(line.startswith("pace 0s") for line in lines)
 
 
 def test_the_table_leaves_out_columns_no_task_has_a_value_for():
     unscored = (Task("a", None), Task("b", None, minutes=30))
     output = StringIO()
     Console(file=output, width=80).print(header_row(None, Shown.of(unscored)))
-    assert output.getvalue().split() == ["title", "dur"]
+    assert output.getvalue().split() == ["dur", "title"]
 
 
 def test_subtotal_shows_how_much_of_its_section_is_done():
@@ -975,8 +975,8 @@ def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
             assert app.day == day
             assert not isinstance(app.screen, ModalScreen)
             # clicks on dur/pt: least first, then most first, then stored order
-            # past the padding, the marker and the score
-            per_point = 1 + 1 + 2 + 10 + 3
+            # past the padding, the marker, the score and the duration
+            per_point = 1 + 1 + 2 + 10 + 3 + 6 + 3
             assert await pilot.click("#columns", offset=(per_point, 0))
             assert shown() == [b.id, a.id, c.id]
             assert await pilot.click("#columns", offset=(per_point, 0))

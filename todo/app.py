@@ -20,6 +20,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Offset
 from textual.message import Message
 from textual.screen import ModalScreen
+from textual.theme import Theme
 from textual.widgets import (
     Footer,
     Input,
@@ -53,6 +54,58 @@ from .model import (
     work,
 )
 
+# catppuccin macchiato
+CRUST = "#181926"
+BASE = "#24273a"
+SURFACE0 = "#363a4f"
+SURFACE1 = "#494d64"
+SURFACE2 = "#5b6078"
+OVERLAY1 = "#8087a2"
+OVERLAY2 = "#939ab7"
+SUBTEXT0 = "#a5adcb"
+TEXT = "#cad3f5"
+ROSEWATER = "#f4dbd6"
+LAVENDER = "#b7bdf8"
+BLUE = "#8aadf4"
+SAPPHIRE = "#7dc4e4"
+TEAL = "#8bd5ca"
+GREEN = "#a6da95"
+YELLOW = "#eed49f"
+RED = "#ed8796"
+
+LABEL = SUBTEXT0
+# units, notes and inactive controls
+MUTED = OVERLAY1
+# rule lines and the unfilled part of bars
+RULE = SURFACE2
+KEY = f"bold {BLUE}"
+
+THEME = Theme(
+    name="macchiato",
+    primary=BLUE,
+    warning=YELLOW,
+    error=RED,
+    success=GREEN,
+    foreground=TEXT,
+    background=BASE,
+    surface=SURFACE0,
+    panel=SURFACE1,
+    dark=True,
+    variables={
+        "label": LABEL,
+        "muted": MUTED,
+        "blue": BLUE,
+        "information": TEAL,
+        "surface0": SURFACE0,
+        "surface1": SURFACE1,
+        "surface2": SURFACE2,
+        "lavender": LAVENDER,
+        "input-cursor-background": ROSEWATER,
+        "input-cursor-foreground": CRUST,
+        "input-selection-background": f"{OVERLAY2} 30%",
+    },
+)
+
 # errors shown to the user, leaving the draft or list unchanged
 RECOVERABLE = (ValueError, sqlite3.Error, OSError)
 
@@ -69,8 +122,8 @@ def duration(seconds: int) -> Text:
     for value, unit in parts:
         if value:
             text.append(str(value))
-            text.append(unit, style="dim")
-    return text if text.plain else Text.assemble("0", ("s", "dim"))
+            text.append(unit, style=MUTED)
+    return text if text.plain else Text.assemble("0", ("s", MUTED))
 
 
 def rate(seconds: int | Fraction, available: Fraction) -> Text:
@@ -126,8 +179,8 @@ COLUMNS = (
 )
 DONE, _, DURATION, PER_POINT = COLUMNS
 
-# a task row is the done marker, the score as earned/available, work per point, the
-# title, and the duration at the right edge; longer values get truncated
+# a task row is the done marker, the score as earned/available, the duration, work per
+# point and the title; longer values get truncated
 EARNED_WIDTH = 5
 AVAILABLE_WIDTH = 4
 SCORE_WIDTH = EARNED_WIDTH + 1 + AVAILABLE_WIDTH
@@ -160,10 +213,10 @@ class Shown(NamedTuple):
         width = 1 + GAP
         if self.score:
             width += 2 + SCORE_WIDTH
-        if self.rate:
-            width += GAP + RATE_WIDTH
         if self.duration:
             width += GAP + DURATION_WIDTH
+        if self.rate:
+            width += GAP + RATE_WIDTH
         return width
 
 
@@ -171,9 +224,9 @@ def row(
     shown: Shown,
     marker: Text,
     scored: Text,
+    length: Text | str,
     per_point: Text | str,
     title: Text,
-    length: Text | str,
 ) -> Table:
     table = Table.grid(expand=True)
     table.add_column(width=1, no_wrap=True)
@@ -183,14 +236,14 @@ def row(
         # the slashes
         table.add_column(width=2 + SCORE_WIDTH, no_wrap=True)
         cells.append(Text("  ") + scored)
+    if shown.duration:
+        table.add_column(width=GAP + DURATION_WIDTH, justify="right", no_wrap=True)
+        cells.append(length)
     if shown.rate:
         table.add_column(width=GAP + RATE_WIDTH, justify="right", no_wrap=True)
         cells.append(per_point)
     table.add_column(ratio=1, no_wrap=True, overflow="ellipsis")
     cells.append(Text(" " * GAP) + title)
-    if shown.duration:
-        table.add_column(width=GAP + DURATION_WIDTH, justify="right", no_wrap=True)
-        cells.append(length)
     table.add_row(*cells)
     return table
 
@@ -199,14 +252,14 @@ def score_cell(earned: Text, available: Text) -> Text:
     """earned/available, aligned on the slash. Changes both arguments."""
     earned.align("right", EARNED_WIDTH)
     available.align("left", AVAILABLE_WIDTH)
-    return Text.assemble(earned, ("/", "dim"), available)
+    return Text.assemble(earned, ("/", MUTED), available)
 
 
 def task_row(task: Task, shown: Shown) -> Table:
     if task.complete:
-        marker, color = "✓", "green"
+        marker, color = "✓", GREEN
     elif task.earned:
-        marker, color = "~", "blue"
+        marker, color = "~", BLUE
     else:
         marker, color = "", ""
     scored = (
@@ -220,11 +273,11 @@ def task_row(task: Task, shown: Shown) -> Table:
         shown,
         Text(marker, style=color),
         scored,
+        duration(task.minutes * 60) if task.minutes else "",
         rate(task.minutes * 60, task.available)
         if task.minutes and task.available is not None
         else "",
-        Text(task.title),
-        duration(task.minutes * 60) if task.minutes else "",
+        Text(task.title, style=MUTED if task.complete else ""),
     )
 
 
@@ -301,18 +354,20 @@ def next_sort(current: Sort | None, column: Column) -> Sort | None:
     return None
 
 
-def column_at(x: int, width: int, shown: Shown) -> Column | None:
-    """The column named at x in a header row width cells wide. Points sort only from
-    the menu, since the score column sorts by the share done."""
+def column_at(x: int, shown: Shown) -> Column | None:
+    """The column named at x in a header row. Points sort only from the menu, since
+    the score column sorts by the share done."""
     start = 1
-    if shown.score:
-        if start <= x < start + 2 + SCORE_WIDTH:
-            return DONE
-        start += 2 + SCORE_WIDTH
-    if shown.rate and start <= x < start + GAP + RATE_WIDTH:
-        return PER_POINT
-    if shown.duration and width - GAP - DURATION_WIDTH <= x < width:
-        return DURATION
+    for column, drawn, width in (
+        (DONE, shown.score, 2 + SCORE_WIDTH),
+        (DURATION, shown.duration, GAP + DURATION_WIDTH),
+        (PER_POINT, shown.rate, GAP + RATE_WIDTH),
+    ):
+        if not drawn:
+            continue
+        if start <= x < start + width:
+            return column
+        start += width
     return None
 
 
@@ -320,7 +375,7 @@ def column_name(column: Column, sort: Sort | None) -> Text:
     if sort is not None and sort.column is column:
         arrow = "↓" if sort.descending else "↑"
         return Text(column.header + arrow, style="bold")
-    return Text(column.header, style="dim")
+    return Text(column.header, style=LABEL)
 
 
 def header_row(sort: Sort | None, shown: Shown) -> RenderableType:
@@ -333,11 +388,11 @@ def header_row(sort: Sort | None, shown: Shown) -> RenderableType:
         shown,
         Text(),
         score_name,
-        column_name(PER_POINT, sort),
-        Text("title", style="dim"),
         column_name(DURATION, sort),
+        column_name(PER_POINT, sort),
+        Text("title", style=LABEL),
     )
-    return names if sort is None else Group(names, Rule(style="dim"))
+    return names if sort is None else Group(names, Rule(style=RULE))
 
 
 def section_label(section: Section) -> str:
@@ -363,17 +418,19 @@ class SectionRule:
         self, console: Console, options: ConsoleOptions
     ) -> RenderResult:
         width = options.max_width
-        left = Text("──", style="dim")
+        left = Text("──", style=RULE)
         if self.title:
             left.append(" ")
             left.append(self.title, style="bold")
             left.append(" ")
-        right = Text(f" {self.share} ──" if self.share else "──", style="dim")
-        if left.cell_len + right.cell_len >= width:
-            right = Text("──", style="dim")
+        right = Text("──", style=RULE)
+        if self.share:
+            share = Text.assemble(" ", (self.share, MUTED), " ", right)
+            if left.cell_len + share.cell_len < width:
+                right = share
         left.truncate(max(width - right.cell_len - 1, 3))
         fill = max(width - left.cell_len - right.cell_len, 1)
-        yield left + Text("─" * fill, style="dim") + right
+        yield left + Text("─" * fill, style=RULE) + right
 
 
 def subtotal_row(section: Section, shown: Shown) -> Table | None:
@@ -396,25 +453,26 @@ def subtotal_row(section: Section, shown: Shown) -> Table | None:
         score_cell(Text(number(earned), style), Text(number(available), style))
         if available
         else Text(),
-        # .plain drops the dim style from the unit letters
+        # .plain drops the units' colour
+        Text(duration(minutes * 60).plain, style) if minutes else "",
         Text(rate(timed_seconds, timed_points).plain, style) if timed_tasks else "",
         title,
-        Text(duration(minutes * 60).plain, style) if minutes else "",
     )
 
 
 # the longest label, "schedule", and two spaces
 LABEL_WIDTH = 10
 # cells on each side of a bar
-GUTTER = 5
+GUTTER = 2
 SHARE_WIDTH = len("100.00%")
 
 
 def pace(ahead: int) -> Text:
+    """Signed, in green when ahead and yellow when behind."""
     if not ahead:
-        return Text("on pace")
-    word, color = ("ahead", "blue") if ahead > 0 else ("behind", "yellow")
-    return Text.assemble((word, color), " ", duration(abs(ahead)))
+        return duration(0)
+    sign, color = ("+", GREEN) if ahead > 0 else ("-", YELLOW)
+    return Text(sign + duration(abs(ahead)).plain, style=color)
 
 
 def moment(value: datetime) -> str:
@@ -434,43 +492,41 @@ def widest(seconds: int) -> int:
 
 
 def value_width(plan: Day | Span) -> int:
-    """Cells for the summary's values: the widest that the list's totals allow, so
-    values keep their right edge while the clock runs."""
+    """Cells for the bars' values. Elapsed time gets the widest the schedule allows, so
+    values keep their right edge while the clock runs; the rest change only with the
+    list."""
     tasks = tuple(plan.tasks())
     earned, available = score(tasks)
     _, scheduled = time_progress(plan.intervals, 0)
-    _, needed = work(tasks)
+    worked, needed = work(tasks)
     widths = [0]
     if scheduled:
         widths.append(widest(scheduled) + len(" / ") + duration(scheduled).cell_len)
-        widths.append(len("behind ") + widest(scheduled))
     if available:
-        whole = len(number(available))
-        widths.append(max(len(number(earned)), whole) + len(" / ") + whole)
+        widths.append(len(f"{number(earned)} / {number(available)}"))
     if needed:
-        seconds = int(needed)
-        widths.append(widest(seconds) + len(" / ") + duration(seconds).cell_len)
-    if scheduled and needed:
-        widths.append(len(percentage((scheduled - needed) / scheduled)) + 1)
+        widths.append((duration(int(worked)) + " / " + duration(int(needed))).cell_len)
     return max(widths)
 
 
-def labelled(label: str, value: Text, width: int) -> Text:
+def labelled(
+    label: str, value: Text, width: int, label_width: int = LABEL_WIDTH
+) -> Text:
     """label at the left edge and value ending width cells after the label column."""
     return Text.assemble(
-        (f"{label:<{LABEL_WIDTH}}", "dim"), " " * (width - value.cell_len), value
+        (f"{label:<{label_width}}", LABEL), " " * (width - value.cell_len), value
     )
 
 
 def schedule_row(plan: Day | Span) -> Text:
     match plan:
         case Day(intervals=()):
-            label, value = "schedule", Text("none", style="dim")
+            label, value = "schedule", Text("none", style=MUTED)
         case Day():
             label = "schedule"
             value = Text(", ").join(
                 Text.assemble(
-                    interval_text(i), (" next day" if i.next_day else "", "dim")
+                    interval_text(i), (" next day" if i.next_day else "", MUTED)
                 )
                 for i in plan.intervals
             )
@@ -478,6 +534,31 @@ def schedule_row(plan: Day | Span) -> Text:
             label, value = "span", Text(span_text(plan))
     # a schedule wider than the values runs on to the right, where its row has no bar
     return labelled(label, value, max(value_width(plan), value.cell_len))
+
+
+def progress_bar(progress: Fraction, color: str, length: int) -> Text:
+    """progress, to the half cell below, at the middle of a one-cell gap between the
+    fill and the track; full only at 100%. A glyph has one colour, so a cell can't end
+    the fill and start the track. Two halves make one cell even when a cell's width in
+    pixels is odd, so the gap is the same width wherever it falls."""
+    middle = min(int(progress * length * 2), length * 2)
+    if middle == 0:
+        return Text("─" * length, style=RULE)
+    if middle == length * 2:
+        return Text("━" * length, style=color)
+    cell, half = divmod(middle, 2)
+    if half:
+        # the gap is that whole cell
+        return Text.assemble(
+            ("━" * cell, color), " ", ("─" * (length - cell - 1), RULE)
+        )
+    # the gap is the right half of the cell before and the left half of this one
+    return Text.assemble(
+        ("━" * (cell - 1), color),
+        ("╸", color),
+        ("╶", RULE),
+        ("─" * (length - cell - 1), RULE),
+    )
 
 
 # a labelled value, or a note
@@ -489,6 +570,14 @@ class Bar(NamedTuple):
     value: Text
     progress: Fraction
     color: str
+
+
+class FigureColumn(NamedTuple):
+    figures: tuple[Figure | None, Figure | None]
+    label_width: int
+    value_width: int
+    # cells for the whole column, notes included
+    width: int
 
 
 class Summary:
@@ -509,12 +598,14 @@ class Summary:
         _, timed_needed = work(timed_tasks)
 
         self.values = value_width(plan)
+        # pace changes with the clock, so its column gets the widest it can be
+        self.pace_width = len("-") + widest(scheduled) if scheduled and available else 0
         self.bars = (
             Bar(
                 "elapsed",
                 duration(elapsed) + " / " + duration(scheduled),
                 Fraction(elapsed, scheduled),
-                "cyan",
+                TEAL,
             )
             if scheduled
             else None,
@@ -522,7 +613,7 @@ class Summary:
                 "points",
                 Text(f"{number(earned)} / {number(available)}"),
                 earned / available,
-                "green",
+                GREEN,
             )
             if available
             else None,
@@ -530,7 +621,7 @@ class Summary:
                 "work",
                 duration(int(worked)) + " / " + duration(int(needed)),
                 worked / needed,
-                "green",
+                SAPPHIRE,
             )
             if needed
             else None,
@@ -544,10 +635,10 @@ class Summary:
             pace_row = ("pace", pace(worth - elapsed))
         if scheduled and needed:
             free = (scheduled - needed) / scheduled
-            style = "yellow" if free < 0 else ""
+            style = YELLOW if free < 0 else ""
             free_row = ("free", Text(f"{percentage(free)}%", style=style))
         missing = sum(t.minutes is None and t.available is not None for t in tasks)
-        # columns of two figures each; the first column's values end with the bars'
+        # columns of two figures each
         self.columns: tuple[tuple[Figure | None, Figure | None], ...] = (
             (progress_row, pace_row),
             (
@@ -563,7 +654,7 @@ class Summary:
             ),
             (
                 free_row,
-                Text(f"{missing} scored, no duration", style="dim")
+                Text(f"{missing} scored, no duration", style=MUTED)
                 if needed and missing
                 else None,
             ),
@@ -579,43 +670,50 @@ class Summary:
         )
         bars = [bar for bar in self.bars if bar is not None]
         for bar in bars:
-            filled = min(int(bar.progress * length), length)
             share = f"{percentage(bar.progress)}%"
             line = Text(no_wrap=True, overflow="ellipsis")
             line.append_text(labelled(bar.label, bar.value, values))
             line.append(" " * GUTTER)
-            line.append("━" * filled, bar.color)
-            line.append("─" * (length - filled), "dim")
+            line.append_text(progress_bar(bar.progress, bar.color, length))
             line.append(f"{share:>{GUTTER + SHARE_WIDTH}}", bar.color)
             yield line
-        widths = [values] + [
-            max(
-                (cell[1].cell_len for cell in column if isinstance(cell, tuple)),
-                default=0,
-            )
-            for column in self.columns[1:]
-        ]
-        columns = [
-            (column, width)
-            for column, width in zip(self.columns, widths, strict=True)
-            if any(column)
-        ]
+        # each column as wide as its own labels and values, and equally spaced: the
+        # first under the bars' labels and the second where the bars start
+        columns: list[FigureColumn] = []
+        for index, column in enumerate(self.columns):
+            if not any(column):
+                continue
+            figures = [cell for cell in column if isinstance(cell, tuple)]
+            notes = [cell.cell_len for cell in column if isinstance(cell, Text)]
+            label_width = max((len(label) for label, _ in figures), default=0) + 2
+            widths = [value.cell_len for _, value in figures]
+            if index == 0:
+                widths.append(self.pace_width)
+            value_width = max(widths, default=0)
+            width = max([label_width + value_width if figures else 0, *notes])
+            columns.append(FigureColumn(column, label_width, value_width, width))
         if bars and columns:
             yield Text()
+        gap = 3 * GUTTER
+        if any(self.columns[0]):
+            gap = max(LABEL_WIDTH + values + GUTTER - columns[0].width, GUTTER)
+        starts = []
+        start = 0
+        for column in columns:
+            starts.append(start)
+            start += column.width + gap
         for row in range(2):
-            if not any(column[row] for column, _ in columns):
+            if not any(column.figures[row] for column in columns):
                 continue
             line = Text(no_wrap=True, overflow="ellipsis")
-            for index, (column, width) in enumerate(columns):
-                if index:
-                    line.append(" " * GUTTER)
-                cell = column[row]
+            for column, start in zip(columns, starts, strict=True):
+                line.append(" " * (start - line.cell_len))
+                cell = column.figures[row]
                 if isinstance(cell, tuple):
-                    cell = labelled(*cell, width)
-                elif cell is None:
-                    cell = Text()
-                line.append_text(cell)
-                line.append(" " * (LABEL_WIDTH + width - cell.cell_len))
+                    cell = labelled(*cell, column.value_width, column.label_width)
+                if cell is not None:
+                    line.append_text(cell)
+                line.append(" " * (start + column.width - line.cell_len))
             line.rstrip()
             yield line
         yield Text(
@@ -799,7 +897,7 @@ class RowMenu(ModalScreen[Callable[[], object] | None]):
             if self.options:
                 self.options.append(None)
             self.options.extend(
-                Text.assemble((f"{item.key:<{keys}}", "bold blue"), item.words)
+                Text.assemble((f"{item.key:<{keys}}", KEY), item.words)
                 for item in group
             )
 
@@ -882,10 +980,17 @@ class TaskPane(Vertical):
             widget.highlighted = widget.selectable_near(old_index or 0, -1)
         empty = self.query_one("#empty", Static)
         if any(view.plan.tasks()):
-            empty.update("all done · f shows them")
+            empty.update(Text.assemble("all done · ", ("f", KEY), " shows them"))
         else:
             copied = "day's list" if isinstance(view.plan, Day) else "span's tasks"
-            empty.update(f"o  add tasks\nc  copy another {copied}")
+            empty.update(
+                Text.assemble(
+                    ("o", KEY),
+                    "  add tasks\n",
+                    ("c", KEY),
+                    f"  copy another {copied}",
+                )
+            )
         empty.display = not view.shown()
         self.query_one("#columns", Static).update(header_row(view.sort, shown))
 
@@ -898,7 +1003,7 @@ class VimScroll(VerticalScroll):
 
 
 class LineButton(Static):
-    def __init__(self, label: str, action: str, **kwargs):
+    def __init__(self, label: str | Text, action: str, **kwargs):
         super().__init__(label, markup=False, **kwargs)
         self.action = action
 
@@ -1137,10 +1242,16 @@ class ScheduleEditor(Form):
                 for interval in self.intervals or (None,):
                     yield self.row(interval)
             with Horizontal(id="row-actions"):
-                yield AddLine("+ add interval", "screen.add_row", classes="row-action")
+                yield AddLine(
+                    Text.assemble(("+", KEY), " add interval"),
+                    "screen.add_row",
+                    classes="row-action",
+                )
                 # must not take focus, since the action removes the focused row
                 yield LineButton(
-                    "- remove interval", "screen.remove_row", classes="row-action"
+                    Text.assemble(("-", KEY), " remove interval"),
+                    "screen.remove_row",
+                    classes="row-action",
                 )
             yield Static("", id="error", markup=False)
             yield save_and_cancel("")
@@ -1182,7 +1293,7 @@ class ScheduleEditor(Form):
                 continue
             text = Text()
             if interval.next_day:
-                text.append("next day  ", style="dim")
+                text.append("next day  ", style=MUTED)
             note.update(text + duration(interval.seconds))
 
     def focused_row(self) -> Horizontal | None:
@@ -1291,7 +1402,7 @@ class HelpScreen(ModalScreen):
                 text.append("\n\n")
             text.append(group, style="bold")
             for keys, description in rows:
-                text.append(f"\n{keys:<{width}}", style="bold blue")
+                text.append(f"\n{keys:<{width}}", style=KEY)
                 text.append(description)
         text.append("\n\nTerms", style="bold")
         width = max(len(term) for term, _ in GLOSSARY) + 2
@@ -1419,7 +1530,7 @@ def picker_lines(spans: tuple[Span, ...], now: datetime) -> list[Text]:
         line = Text(title)
         line.pad_right(width - line.cell_len)
         line.append(f"  {span_text(span)}  {done:>7}  ")
-        line.append(f"{span_status(span, now):<5}", style="dim")
+        line.append(f"{span_status(span, now):<5}", style=MUTED)
         lines.append(line)
     return lines
 
@@ -1571,7 +1682,10 @@ class TodoApp(App):
     ]
 
     def __init__(self, store: Store, list_date: date):
-        super().__init__(ansi_color=True)
+        super().__init__()
+        # before the stylesheet is parsed, which needs the theme's variables
+        self.register_theme(THEME)
+        self.theme = THEME.name
         self.store = store
         # per list, for this session only. Safe because the store is locked.
         self.histories: dict[date | str, list[Change]] = {}
@@ -1633,7 +1747,6 @@ class TodoApp(App):
         yield Footer(compact=True)
 
     def on_mount(self) -> None:
-        self.theme = "ansi-dark"
         self.redraw(self.current_view().first_row())
         self.set_interval(1, self.refresh_stats)
         self.query_one("#tasks", VimList).focus()
@@ -1739,9 +1852,9 @@ class TodoApp(App):
         hidden.display = self.hide_done
         hidden.update(
             Text.assemble(
-                (f"{current.hidden} done hidden · ", "dim"),
-                ("f", "bold blue"),
-                (" shows them", "dim"),
+                (f"{current.hidden} done hidden · ", MUTED),
+                ("f", KEY),
+                (" shows them", MUTED),
             )
         )
         self.refresh_stats()
@@ -2234,15 +2347,10 @@ class TodoApp(App):
 
     @on(events.Click, "#columns")
     def sort_by_column(self, event: events.Click) -> None:
-        names = self.query_one("#columns")
-        offset = event.get_content_offset(names)
+        offset = event.get_content_offset(self.query_one("#columns"))
         shown = Shown.of(self.plan.tasks())
         # only row 0 has column names
-        column = (
-            column_at(offset.x, names.content_region.width, shown)
-            if offset and offset.y == 0
-            else None
-        )
+        column = column_at(offset.x, shown) if offset and offset.y == 0 else None
         if column is not None:
             self.set_sort(next_sort(self.sort, column))
 
