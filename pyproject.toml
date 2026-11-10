@@ -13,13 +13,22 @@ dependencies = ["textual>=8.2.8,<9", "platformdirs>=4,<5", "rich>=15,<16"]
 todo = "todo.app:main"
 
 [dependency-groups]
-dev = ["pytest>=8,<10"]
+dev = [
+    "pytest>=8,<10",
+    "pytest-xdist>=3.8,<4",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["todo"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "-n auto"
+# workers don't inherit -X dev, so leaked connections must fail rather than warn
+filterwarnings = [
+    "error::ResourceWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]
 
 [tool.ruff]
 line-length = 88
