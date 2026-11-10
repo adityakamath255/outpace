@@ -1529,59 +1529,32 @@ def picker_lines(spans: tuple[Span, ...], now: datetime) -> list[Text]:
     return lines
 
 
-class SpanManager(NamedTuple):
-    """Callbacks the picker uses. delete and restore return the remaining spans, or None
-    from restore if nothing was deleted."""
-
-    new: Callable[[], object]
-    delete: Callable[[Span], tuple[Span, ...]]
-    restore: Callable[[], tuple[Span, ...] | None]
-
-
 class SpanPicker(ModalScreen):
-    """The spans, latest start first. Choosing one calls on_choose. With a manager, the
-    picker can also add spans and delete and restore them."""
+    """The spans, latest start first, under title. Choosing one calls on_choose."""
 
-    BINDINGS = [
-        ("escape", "dismiss", "Close"),
-        Binding("o", "new", "New span", show=False),
-        Binding("x", "delete", "Delete span", show=False),
-        Binding("u", "restore", "Restore span", show=False),
-    ]
+    BINDINGS = [("escape", "dismiss", "Close")]
 
     def __init__(
         self,
+        title: str,
         spans: tuple[Span, ...],
         on_choose: Callable[[Span], object],
-        manager: SpanManager | None = None,
         selected: str | None = None,
+        buttons: tuple[tuple[str, str], ...] = (("cancel", "screen.dismiss"),),
     ):
         super().__init__()
+        self.title_text = title
         self.spans = spans
         self.on_choose = on_choose
-        self.manager = manager
         self.selected = selected
+        self.buttons = buttons
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="dialog", id="picker-dialog"):
-            if self.manager is None:
-                yield Label(
-                    "Replace this span's tasks with a copy of", classes="dialog-title"
-                )
-                yield VimList(id="picker")
-                yield Static("", id="no-spans", classes="muted")
-                yield bottom_row("", ("cancel", "screen.dismiss"))
-            else:
-                yield Label("Spans", classes="dialog-title")
-                yield VimList(id="picker")
-                yield Static("no spans yet", id="no-spans", classes="muted")
-                yield bottom_row(
-                    "",
-                    ("new", "screen.new"),
-                    ("delete", "screen.delete"),
-                    ("restore", "screen.restore"),
-                    ("close", "screen.dismiss"),
-                )
+            yield Label(self.title_text, classes="dialog-title")
+            yield VimList(id="picker")
+            yield Static("no spans yet", id="no-spans", classes="muted")
+            yield bottom_row("", *self.buttons)
 
     def on_mount(self) -> None:
         self.show(self.spans, self.selected)
@@ -1604,34 +1577,65 @@ class SpanPicker(ModalScreen):
         if self.spans:
             picker.focus()
 
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool:
-        return self.manager is not None or action not in ("new", "delete", "restore")
-
     @on(OptionList.OptionSelected)
     def choose(self, event: OptionList.OptionSelected) -> None:
         self.dismiss()
         self.on_choose(self.spans[event.option_index])
 
+
+class SpanManager(SpanPicker):
+    """The span picker that also adds spans and deletes and restores them. delete and
+    restore return the spans left, or None from restore when nothing was deleted."""
+
+    BINDINGS = [
+        Binding("o", "new", "New span", show=False),
+        Binding("x", "delete", "Delete span", show=False),
+        Binding("u", "restore", "Restore span", show=False),
+    ]
+
+    def __init__(
+        self,
+        spans: tuple[Span, ...],
+        on_choose: Callable[[Span], object],
+        selected: str | None,
+        *,
+        new: Callable[[], object],
+        delete: Callable[[Span], tuple[Span, ...]],
+        restore: Callable[[], tuple[Span, ...] | None],
+    ):
+        super().__init__(
+            "Spans",
+            spans,
+            on_choose,
+            selected,
+            (
+                ("new", "screen.new"),
+                ("delete", "screen.delete"),
+                ("restore", "screen.restore"),
+                ("close", "screen.dismiss"),
+            ),
+        )
+        self.new = new
+        self.delete = delete
+        self.restore = restore
+
     def action_new(self) -> None:
-        if self.manager is not None:
-            self.dismiss()
-            self.manager.new()
+        self.dismiss()
+        self.new()
 
     def action_delete(self) -> None:
         index = self.query_one("#picker", VimList).highlighted
-        if self.manager is None or index is None:
+        if index is None:
             return
         span = self.spans[index]
-        self.show(self.manager.delete(span), None)
+        self.show(self.delete(span), None)
         name = span.title or span_text(span)
         self.app.notify(
             f"Deleted {name}; restore brings it back.", timeout=4, markup=False
         )
 
     def action_restore(self) -> None:
-        if self.manager is None:
-            return
-        restored = self.manager.restore()
+        restored = self.restore()
         if restored is None:
             self.app.notify("No deleted span to restore.", timeout=2)
             return
@@ -1747,7 +1751,7 @@ class TodoApp(App):
 
     def action_choose(self) -> None:
         if self.showing_spans:
-            self.open_picker()
+            self.choose_span()
         else:
             self.choose_day()
 
@@ -2011,7 +2015,7 @@ class TodoApp(App):
 
     def action_copy(self) -> None:
         if self.showing_spans:
-            self.open_picker(copying=True)
+            self.copy_span()
         else:
             self.copy_day()
 
@@ -2161,27 +2165,34 @@ class TodoApp(App):
 
         self.push_screen(SpanEditor(None, create))
 
-    def open_picker(self, *, copying: bool = False) -> None:
-        if copying:
-            open_id = plan_key(self.plan)
-
-            def copy(source: Span) -> None:
-                name = source.title or span_text(source)
-                self.save_change(
-                    self.plan.with_sections(fresh_copy(source.sections)),
-                    f"replaced the tasks with {name}'s",
-                )
-
-            sources = tuple(s for s in self.store.spans() if s.id != open_id)
-            if not sources:
-                self.notify("No other spans yet.")
-                return
-            self.push_screen(SpanPicker(sources, copy))
-            return
-        manager = SpanManager(self.new_span, self.delete_span, self.restore_span)
-        selected = self.span.id if self.span is not None else None
+    def choose_span(self) -> None:
         self.push_screen(
-            SpanPicker(self.store.spans(), self.open_span, manager, selected)
+            SpanManager(
+                self.store.spans(),
+                self.open_span,
+                self.span.id if self.span is not None else None,
+                new=self.new_span,
+                delete=self.delete_span,
+                restore=self.restore_span,
+            )
+        )
+
+    def copy_span(self) -> None:
+        open_id = plan_key(self.plan)
+        sources = tuple(s for s in self.store.spans() if s.id != open_id)
+        if not sources:
+            self.notify("No other spans yet.")
+            return
+
+        def copy(source: Span) -> None:
+            name = source.title or span_text(source)
+            self.save_change(
+                self.plan.with_sections(fresh_copy(source.sections)),
+                f"replaced the tasks with {name}'s",
+            )
+
+        self.push_screen(
+            SpanPicker("Replace this span's tasks with a copy of", sources, copy)
         )
 
     def delete_span(self, span: Span) -> tuple[Span, ...]:

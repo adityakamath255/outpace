@@ -18,7 +18,7 @@ from todo.app import (
     ScheduleEditor,
     SectionRule,
     Sort,
-    SpanPicker,
+    SpanManager,
     Summary,
     TodoApp,
     VimList,
@@ -1142,7 +1142,7 @@ def test_the_picker_deletes_spans_moving_on_and_restores_them(app):
             app.open_span(first)
             await pilot.press("T")
             picker = app.screen
-            assert isinstance(picker, SpanPicker)
+            assert isinstance(picker, SpanManager)
             # latest to start first, with the open list selected
             assert [s.title for s in picker.spans] == ["second", "first"]
             assert picker.query_one("#picker", VimList).highlighted == 1
