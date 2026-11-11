@@ -777,7 +777,7 @@ HELP = (
             "Days and spans",
             (
                 ("tab", "switch between days and spans"),
-                ("[ ]", "previous or next day, or span"),
+                ("[ ]", "previous or next day or span, or a new span"),
                 ("t", "today"),
                 ("T", "open a date, or the spans"),
                 ("c", "replace this list with another's"),
@@ -1787,6 +1787,8 @@ class TodoApp(App):
             index = [plan_key(s) for s in spans].index(plan_key(self.plan)) + offset
             if 0 <= index < len(spans):
                 self.open_span(spans[index])
+            elif index == len(spans):
+                self.new_span()
             return
         try:
             target = self.day.date + timedelta(days=offset)

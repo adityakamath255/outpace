@@ -18,6 +18,7 @@ from todo.app import (
     ScheduleEditor,
     SectionRule,
     Sort,
+    SpanEditor,
     SpanManager,
     Summary,
     TodoApp,
@@ -1158,6 +1159,10 @@ def test_a_new_span_takes_whole_dates_and_at_edits_its_time_and_days_off(app):
             assert app.plan.off == (date(2026, 11, 20), date(2026, 11, 21))
             await pilot.press("u", "u")
             assert app.store.spans() == (created,)
+            # past the latest span, the next one is a new span
+            await pilot.press("right_square_bracket")
+            assert isinstance(app.screen, SpanEditor)
+            assert app.screen.query_one("#span-title", Input).value == ""
 
     asyncio.run(create())
 
