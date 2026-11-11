@@ -1376,12 +1376,12 @@ class ScheduleEditor(Form):
     to keep the draft."""
 
     BINDINGS = [
-        # priority so a focused Input doesn't swallow these. The time fields reject +
-        # and - anyway.
+        # priority so a focused Input doesn't swallow + and -, which the time fields
+        # reject anyway, and so the scrolling rows don't take up and down to scroll
         Binding("plus", "add_row", "Add interval", show=False, priority=True),
         Binding("minus", "remove_row", "Remove interval", show=False, priority=True),
-        Binding("up", "move(-1)", "Previous row", show=False),
-        Binding("down", "move(1)", "Next row", show=False),
+        Binding("up", "move(-1)", "Previous row", show=False, priority=True),
+        Binding("down", "move(1)", "Next row", show=False, priority=True),
     ]
 
     def __init__(
