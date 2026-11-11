@@ -232,12 +232,27 @@ def seconds_since(origin: datetime, now: datetime) -> int:
     return int((now - origin).total_seconds())
 
 
+@dataclass(frozen=True)
+class Tally:
+    """A list's earned and available points as of a moment, to the second, which is
+    all the store keeps."""
+
+    at: datetime
+    earned: Fraction
+    available: Fraction
+
+    def __post_init__(self) -> None:
+        if self.at.tzinfo or self.at.microsecond:
+            raise ValueError("A tally is a local time to the second.")
+
+
 class Plan:
     """Sections of tasks and the edits every kind of list shares. Each kind
     is a frozen dataclass with a sections field, which check_sections has
-    vetted."""
+    vetted, and tallies of its points over time, oldest first."""
 
     sections: tuple[Section, ...]
+    tallies: tuple[Tally, ...]
 
     def with_sections(self, sections: tuple[Section, ...]) -> Self:
         raise NotImplementedError
@@ -359,6 +374,7 @@ class Day(Plan):
     # stored in start order whatever order they are given in
     intervals: tuple[Interval, ...]
     sections: tuple[Section, ...]
+    tallies: tuple[Tally, ...] = ()
 
     def __post_init__(self) -> None:
         check_sections(self.sections)
@@ -403,6 +419,7 @@ class Span(Plan):
     id: str = field(default_factory=identifier)
     # dates the span overlaps, stored in order without repeats
     off: tuple[date, ...] = ()
+    tallies: tuple[Tally, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "title", self.title.strip())
@@ -440,6 +457,21 @@ class Span(Plan):
         if counted_from < self.end:
             intervals.append(Interval(minutes(counted_from), minutes(self.end)))
         return tuple(intervals)
+
+
+def tallied(plan: Day | Span, now: datetime) -> Day | Span:
+    """plan with a tally of its points as of now added, unless the points equal the
+    last tally's. A list without tallies counts as having had no points."""
+    earned, available = score(plan.tasks())
+    last = (
+        (plan.tallies[-1].earned, plan.tallies[-1].available)
+        if plan.tallies
+        else (0, 0)
+    )
+    if (earned, available) == last:
+        return plan
+    tally = Tally(now.replace(microsecond=0), earned, available)
+    return replace(plan, tallies=(*plan.tallies, tally))
 
 
 def empty_day(day: date) -> Day:

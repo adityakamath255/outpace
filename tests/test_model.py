@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from fractions import Fraction
 
 import pytest
@@ -9,6 +9,7 @@ from todo.model import (
     Interval,
     Section,
     Span,
+    Tally,
     Task,
     days_text,
     empty_day,
@@ -22,6 +23,7 @@ from todo.model import (
     schedule,
     score,
     seconds_since,
+    tallied,
     time_progress,
 )
 
@@ -268,6 +270,19 @@ def test_days_off_read_dates_and_ranges_and_print_runs_as_ranges():
         parse_days("2026-11-20, 11-21")
     with pytest.raises(ValueError, match="after it starts"):
         parse_days("2026-11-27 - 2026-11-25")
+
+
+def test_a_tally_is_kept_only_when_the_points_change():
+    day = replace(empty_day(DAY), sections=(Section("", (Task("a", points("2")),)),))
+    at = datetime(2026, 11, 1, 9, 0, 0, 500)
+    counted = tallied(day, at)
+    assert counted.tallies == (
+        Tally(datetime(2026, 11, 1, 9), Fraction(0), Fraction(2)),
+    )
+    assert tallied(counted, at + timedelta(hours=1)) == counted
+    # a list without points has nothing to graph
+    empty = empty_day(DAY)
+    assert tallied(empty, at) == empty
 
 
 def test_percentages_truncate_and_per_point_needs_points():

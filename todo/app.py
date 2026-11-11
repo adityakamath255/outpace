@@ -52,6 +52,7 @@ from .model import (
     schedule,
     score,
     seconds_since,
+    tallied,
     time_progress,
     work,
 )
@@ -1966,6 +1967,7 @@ class TodoApp(App):
         before = self.plan
         if plan == before:
             return False
+        plan = tallied(plan, datetime.now())
         self.store.save(plan)
         key = plan_key(plan)
         self.histories.setdefault(key, []).append(Change(before, description, subject))
@@ -2204,8 +2206,9 @@ class TodoApp(App):
 
         def copy(source: Span) -> None:
             name = source.title or span_text(source)
+            # the tallies tracked the replaced tasks
             self.save_change(
-                self.plan.with_sections(fresh_copy(source.sections)),
+                replace(self.plan, sections=fresh_copy(source.sections), tallies=()),
                 f"replaced the tasks with {name}'s",
             )
 

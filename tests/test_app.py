@@ -318,6 +318,26 @@ def test_x_deletes_without_a_dialog_and_undo_names_the_change(app, monkeypatch):
     asyncio.run(delete_and_undo())
 
 
+def test_points_changes_are_tallied_and_undo_and_redo_take_the_tally_along(app):
+    async def change():
+        async with app.run_test() as pilot:
+            await pilot.press("space")
+            (done,) = app.day.tallies
+            assert (done.earned, done.available) == (5, 5)
+            # a change that keeps the points keeps the tallies
+            await pilot.press("e")
+            app.screen.query_one("#title", Input).value = "Scales"
+            await pilot.press("enter")
+            assert app.selected()[1].title == "Scales"
+            assert app.day.tallies == (done,)
+            await pilot.press("u", "u")
+            assert app.day.tallies == ()
+            await pilot.press("ctrl+r")
+            assert app.day.tallies == (done,)
+
+    asyncio.run(change())
+
+
 def test_plus_and_minus_step_points_and_undo_names_the_change(app, monkeypatch):
     messages = []
     monkeypatch.setattr(

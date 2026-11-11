@@ -5,7 +5,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
-from .model import Day, Interval, Section, Span, Task, empty_day
+from .model import Day, Interval, Section, Span, Tally, Task, empty_day
 
 # version 3 added the spans table; version 2 databases get it on open
 VERSION = 3
@@ -55,11 +55,26 @@ def decode_sections(data: list[dict[str, Any]]) -> tuple[Section, ...]:
     )
 
 
+def encode_tallies(tallies: tuple[Tally, ...]) -> list[list[str]]:
+    return [
+        [tally.at.isoformat(), str(tally.earned), str(tally.available)]
+        for tally in tallies
+    ]
+
+
+def decode_tallies(data: list[list[str]]) -> tuple[Tally, ...]:
+    return tuple(
+        Tally(datetime.fromisoformat(at), Fraction(earned), Fraction(available))
+        for at, earned, available in data
+    )
+
+
 def encode(day: Day) -> str:
     return json.dumps(
         {
             "intervals": [[interval.start, interval.end] for interval in day.intervals],
             "sections": encode_sections(day.sections),
+            "tallies": encode_tallies(day.tallies),
         },
         ensure_ascii=False,
     )
@@ -71,6 +86,8 @@ def decode(list_date: date, text: str) -> Day:
         list_date,
         tuple(Interval(start, end) for start, end in data["intervals"]),
         decode_sections(data["sections"]),
+        # days saved before tallies have none
+        decode_tallies(data.get("tallies", [])),
     )
 
 
@@ -82,6 +99,7 @@ def encode_span(span: Span) -> str:
             "end": span.end.isoformat(timespec="minutes"),
             "off": [day.isoformat() for day in span.off],
             "sections": encode_sections(span.sections),
+            "tallies": encode_tallies(span.tallies),
         },
         ensure_ascii=False,
     )
@@ -95,8 +113,9 @@ def decode_span(span_id: str, text: str) -> Span:
         datetime.fromisoformat(data["end"]),
         decode_sections(data["sections"]),
         span_id,
-        # spans saved before days off have no "off"
-        tuple(date.fromisoformat(day) for day in data.get("off", ())),
+        # spans saved before days off or tallies have neither
+        tuple(date.fromisoformat(day) for day in data.get("off", [])),
+        decode_tallies(data.get("tallies", [])),
     )
 
 

@@ -2,11 +2,12 @@ import sqlite3
 from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime
+from fractions import Fraction
 
 import pytest
 
 from todo.db import Store, decode
-from todo.model import Day, Section, Span, Task, empty_day, points
+from todo.model import Day, Section, Span, Tally, Task, empty_day, points
 
 DAY = date(2026, 11, 1)
 
@@ -105,22 +106,31 @@ def test_a_version_2_database_keeps_its_days_and_gains_spans(tmp_path):
         assert store.spans() == ()
 
 
-def test_a_span_keeps_its_days_off_and_older_spans_have_none(tmp_path):
+def test_tallies_and_days_off_survive_a_save_and_older_spans_have_neither(tmp_path):
+    tallies = (Tally(datetime(2026, 11, 6, 11, 2, 5), Fraction(1, 2), Fraction(2)),)
     span = Span(
         "november",
         datetime(2026, 11, 6, 10, 30),
         datetime(2026, 12, 1),
         planned(DAY).sections,
         off=(date(2026, 11, 20),),
+        tallies=tallies,
     )
+    day = replace(planned(DAY), tallies=tallies)
     path = tmp_path / "todo.sqlite3"
     with closing(Store(path)) as store:
         store.save(span)
-        store.save(replace(span, id="older", off=()))
-    # as spans were saved before days off
+        store.save(day)
+        store.save(replace(span, id="older", off=(), tallies=()))
+    # as spans were saved before days off and tallies
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
-            "UPDATE spans SET data = json_remove(data, '$.off') WHERE id = 'older'"
+            "UPDATE spans SET data = json_remove(data, '$.off', '$.tallies') "
+            "WHERE id = 'older'"
         )
     with closing(Store(path)) as store:
-        assert set(store.spans()) == {span, replace(span, id="older", off=())}
+        assert store.load(DAY) == day
+        assert set(store.spans()) == {
+            span,
+            replace(span, id="older", off=(), tallies=()),
+        }
