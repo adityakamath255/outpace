@@ -1,7 +1,7 @@
 import re
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal, localcontext
 from fractions import Fraction
 from itertools import pairwise
@@ -193,6 +193,36 @@ def parse_date(value: str) -> date:
     return parsed
 
 
+def parse_days(text: str) -> tuple[date, ...]:
+    """Dates from a comma-separated list of dates and ranges like 2026-11-25 -
+    2026-11-27, in order and without repeats. Blank text gives none."""
+    days: set[date] = set()
+    for part in filter(None, (part.strip() for part in text.split(","))):
+        first, _, last = part.partition(" - ")
+        start = parse_date(first)
+        end = parse_date(last) if last else start
+        if end < start:
+            raise ValueError(f"The range {part} must end after it starts.")
+        days.update(start + timedelta(days=n) for n in range((end - start).days + 1))
+    return tuple(sorted(days))
+
+
+def days_text(days: tuple[date, ...]) -> str:
+    """days, in order, as parse_days reads them, with each run as a range."""
+    runs: list[list[date]] = []
+    for day in days:
+        if runs and day - runs[-1][-1] == timedelta(days=1):
+            runs[-1].append(day)
+        else:
+            runs.append([day])
+    return ", ".join(
+        run[0].isoformat()
+        if len(run) == 1
+        else f"{run[0].isoformat()} - {run[-1].isoformat()}"
+        for run in runs
+    )
+
+
 def clock(minutes: int) -> str:
     return f"{minutes // 60 % 24:02d}:{minutes % 60:02d}"
 
@@ -362,8 +392,8 @@ class Day(Plan):
 
 @dataclass(frozen=True)
 class Span(Plan):
-    """A list from start to end. All of that time counts toward the stats, and
-    spans may overlap."""
+    """A list from start to end. Its time counts toward the stats, except the whole
+    days in off. Spans may overlap."""
 
     title: str
     # local times to the minute, which is all the store keeps
@@ -371,6 +401,8 @@ class Span(Plan):
     end: datetime
     sections: tuple[Section, ...]
     id: str = field(default_factory=identifier)
+    # dates the span overlaps, stored in order without repeats
+    off: tuple[date, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "title", self.title.strip())
@@ -380,6 +412,11 @@ class Span(Plan):
             raise ValueError("A span's start and end are local times to the minute.")
         if self.end <= self.start:
             raise ValueError("A span must end after it starts.")
+        object.__setattr__(self, "off", tuple(sorted(set(self.off))))
+        for day in self.off:
+            midnight = datetime.combine(day, time())
+            if not (midnight < self.end and midnight + timedelta(days=1) > self.start):
+                raise ValueError("Days off must fall within the span.")
 
     def with_sections(self, sections: tuple[Section, ...]) -> Self:
         return replace(self, sections=sections)
@@ -390,8 +427,19 @@ class Span(Plan):
 
     @property
     def intervals(self) -> tuple[Interval, ...]:
-        minutes = int((self.end - self.start).total_seconds()) // 60
-        return (Interval(0, minutes),)
+        def minutes(moment: datetime) -> int:
+            return int((moment - self.start).total_seconds()) // 60
+
+        intervals = []
+        counted_from = self.start
+        for day in self.off:
+            midnight = datetime.combine(day, time())
+            if counted_from < midnight:
+                intervals.append(Interval(minutes(counted_from), minutes(midnight)))
+            counted_from = max(counted_from, midnight + timedelta(days=1))
+        if counted_from < self.end:
+            intervals.append(Interval(minutes(counted_from), minutes(self.end)))
+        return tuple(intervals)
 
 
 def empty_day(day: date) -> Day:

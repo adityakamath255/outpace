@@ -38,11 +38,13 @@ from .model import (
     Span,
     Task,
     clock,
+    days_text,
     fresh_copy,
     interval_text,
     number,
     parse_clock,
     parse_date,
+    parse_days,
     parse_minutes,
     per_point,
     percentage,
@@ -1429,7 +1431,7 @@ class SpanEditor(Form):
     def __init__(
         self,
         span: Span | None,
-        on_submit: Callable[[str, datetime, datetime], object],
+        on_submit: Callable[[str, datetime, datetime, tuple[date, ...]], object],
     ):
         super().__init__()
         self.span = span
@@ -1474,6 +1476,14 @@ class SpanEditor(Form):
                 yield from moment_fields(None if span is None else span.start, "from")
                 yield Label("to", id="to-label")
                 yield from moment_fields(None if span is None else span.end, "to")
+            with Horizontal(classes="span-row"):
+                yield Label("off")
+                yield Input(
+                    "" if span is None else days_text(span.off),
+                    id="span-off",
+                    compact=True,
+                    select_on_focus=False,
+                )
             yield Static("", id="error", markup=False)
             yield save_and_cancel("", "add" if span is None else "save")
 
@@ -1502,7 +1512,11 @@ class SpanEditor(Form):
 
     def save(self) -> None:
         start, end = self.read()
-        self.on_submit(self.query_one("#span-title", Input).value, start, end)
+        try:
+            off = parse_days(self.query_one("#span-off", Input).value)
+        except ValueError as error:
+            raise ValueError(f"Days off: {error}") from None
+        self.on_submit(self.query_one("#span-title", Input).value, start, end, off)
         self.dismiss()
 
 
@@ -2124,9 +2138,9 @@ class TodoApp(App):
                 self.push_screen(
                     SpanEditor(
                         span,
-                        lambda title, start, end: self.save_change(
-                            replace(span, title=title, start=start, end=end),
-                            "changed the span's title and time",
+                        lambda title, start, end, off: self.save_change(
+                            replace(span, title=title, start=start, end=end, off=off),
+                            "changed the span",
                         ),
                     )
                 )
@@ -2158,8 +2172,10 @@ class TodoApp(App):
         self.redraw(self.current_view().first_row())
 
     def new_span(self) -> None:
-        def create(title: str, start: datetime, end: datetime) -> None:
-            span = Span(title, start, end, (Section(""),))
+        def create(
+            title: str, start: datetime, end: datetime, off: tuple[date, ...]
+        ) -> None:
+            span = Span(title, start, end, (Section(""),), off=off)
             self.store.save(span)
             self.open_span(span)
 

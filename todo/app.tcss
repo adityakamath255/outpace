@@ -310,7 +310,7 @@ Toast {
     margin-right: 1;
 }
 
-#span-title, #span-title:focus {
+#span-title, #span-title:focus, #span-off, #span-off:focus {
     width: 1fr;
     margin-right: 0;
 }

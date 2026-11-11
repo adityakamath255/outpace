@@ -10,9 +10,11 @@ from todo.model import (
     Section,
     Span,
     Task,
+    days_text,
     empty_day,
     number,
     parse_clock,
+    parse_days,
     parse_minutes,
     per_point,
     percentage,
@@ -223,6 +225,49 @@ def test_a_span_counts_all_its_time_and_must_end_after_it_starts():
     # the store keeps minutes, so seconds would not survive a save
     with pytest.raises(ValueError, match="to the minute"):
         replace(span, end=datetime(2026, 12, 1, 0, 0, 30))
+
+
+def test_days_off_leave_a_span_whole_days_clipped_to_its_ends():
+    span = Span(
+        "november",
+        datetime(2026, 11, 6, 10, 30),
+        datetime(2026, 11, 12, 6),
+        (Section(""),),
+        off=(
+            date(2026, 11, 12),
+            date(2026, 11, 8),
+            date(2026, 11, 9),
+            date(2026, 11, 6),
+        ),
+    )
+    assert span.off == (
+        date(2026, 11, 6),
+        date(2026, 11, 8),
+        date(2026, 11, 9),
+        date(2026, 11, 12),
+    )
+    # minutes from 11-06 10:30: 11-07, then 11-10 and 11-11
+    assert span.intervals == (
+        Interval(13 * 60 + 30, 37 * 60 + 30),
+        Interval(85 * 60 + 30, 133 * 60 + 30),
+    )
+    assert (
+        replace(span, off=tuple(date(2026, 11, d) for d in range(6, 13))).intervals
+        == ()
+    )
+    with pytest.raises(ValueError, match="within the span"):
+        replace(span, off=(date(2026, 11, 5),))
+
+
+def test_days_off_read_dates_and_ranges_and_print_runs_as_ranges():
+    days = parse_days(" 2026-11-20, 2026-11-25 - 2026-11-27,2026-11-21 ")
+    assert days == tuple(date(2026, 11, d) for d in (20, 21, 25, 26, 27))
+    assert days_text(days) == "2026-11-20 - 2026-11-21, 2026-11-25 - 2026-11-27"
+    assert parse_days(" ") == ()
+    with pytest.raises(ValueError, match="YYYY-MM-DD"):
+        parse_days("2026-11-20, 11-21")
+    with pytest.raises(ValueError, match="after it starts"):
+        parse_days("2026-11-27 - 2026-11-25")
 
 
 def test_percentages_truncate_and_per_point_needs_points():

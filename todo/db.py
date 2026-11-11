@@ -80,6 +80,7 @@ def encode_span(span: Span) -> str:
             "title": span.title,
             "start": span.start.isoformat(timespec="minutes"),
             "end": span.end.isoformat(timespec="minutes"),
+            "off": [day.isoformat() for day in span.off],
             "sections": encode_sections(span.sections),
         },
         ensure_ascii=False,
@@ -94,6 +95,8 @@ def decode_span(span_id: str, text: str) -> Span:
         datetime.fromisoformat(data["end"]),
         decode_sections(data["sections"]),
         span_id,
+        # spans saved before days off have no "off"
+        tuple(date.fromisoformat(day) for day in data.get("off", ())),
     )
 
 

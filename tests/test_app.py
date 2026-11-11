@@ -1123,7 +1123,7 @@ def test_days_and_spans_keep_their_own_list_history_and_progress(app):
     asyncio.run(switch())
 
 
-def test_a_new_span_takes_whole_dates_and_at_edits_its_time(app):
+def test_a_new_span_takes_whole_dates_and_at_edits_its_time_and_days_off(app):
     def fill(**values):
         for selector, value in values.items():
             app.screen.query_one(f"#{selector}", Input).value = value
@@ -1149,7 +1149,14 @@ def test_a_new_span_takes_whole_dates_and_at_edits_its_time(app):
             fill(**{"from-time": "10:30"})
             await pilot.press("enter")
             assert app.plan.start == datetime(2026, 11, 6, 10, 30)
-            await pilot.press("u")
+            await pilot.press("at")
+            fill(**{"span-off": "2026-12-01"})
+            await pilot.press("enter")
+            assert "within the span" in str(app.screen.query_one("#error").content)
+            fill(**{"span-off": "2026-11-20 - 2026-11-21"})
+            await pilot.press("enter")
+            assert app.plan.off == (date(2026, 11, 20), date(2026, 11, 21))
+            await pilot.press("u", "u")
             assert app.store.spans() == (created,)
 
     asyncio.run(create())

@@ -103,3 +103,24 @@ def test_a_version_2_database_keeps_its_days_and_gains_spans(tmp_path):
         assert store.spans() == (span,)
         store.delete_span(span.id)
         assert store.spans() == ()
+
+
+def test_a_span_keeps_its_days_off_and_older_spans_have_none(tmp_path):
+    span = Span(
+        "november",
+        datetime(2026, 11, 6, 10, 30),
+        datetime(2026, 12, 1),
+        planned(DAY).sections,
+        off=(date(2026, 11, 20),),
+    )
+    path = tmp_path / "todo.sqlite3"
+    with closing(Store(path)) as store:
+        store.save(span)
+        store.save(replace(span, id="older", off=()))
+    # as spans were saved before days off
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute(
+            "UPDATE spans SET data = json_remove(data, '$.off') WHERE id = 'older'"
+        )
+    with closing(Store(path)) as store:
+        assert set(store.spans()) == {span, replace(span, id="older", off=())}
