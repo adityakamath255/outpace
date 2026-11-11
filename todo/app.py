@@ -468,18 +468,10 @@ GUTTER = 2
 SHARE_WIDTH = len("100.00%")
 
 
-def signed(seconds: int) -> str:
+def signed(seconds: int) -> Text:
     if not seconds:
-        return "0"
-    return ("+" if seconds > 0 else "-") + duration(abs(seconds)).plain
-
-
-def pace_color(ahead: int) -> str:
-    return GREEN if ahead > 0 else YELLOW if ahead < 0 else TEXT
-
-
-def pace(ahead: int) -> Text:
-    return Text(signed(ahead), style=pace_color(ahead)) if ahead else duration(0)
+        return Text("0")
+    return Text("+" if seconds > 0 else "-") + duration(abs(seconds))
 
 
 def moment(value: datetime) -> str:
@@ -628,7 +620,7 @@ class Summary:
         if scheduled and available:
             worth = progress(scheduled, earned, available)
             progress_row = ("progress", duration(worth))
-            pace_row = ("pace", pace(worth - elapsed))
+            pace_row = ("pace", signed(worth - elapsed))
         if scheduled and needed:
             free = (scheduled - needed) / scheduled
             style = YELLOW if free < 0 else ""
@@ -823,7 +815,7 @@ def pace_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text
         row: signed((zero - row) // per_step * step)
         for row in range(zero % per_step, rows, per_step)
     }
-    left = max(len(label) for label in labels.values()) + 2
+    left = max(label.cell_len for label in labels.values()) + 2
     plot_width = width - left
     if plot_width < 10:
         return Text()
@@ -854,12 +846,15 @@ def pace_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text
         # a vertical run joins a jump at a tally
         joined = y if previous is None else previous
         for run in range(min(y, joined), max(y, joined) + 1):
-            dot(x, run, pace_color(value))
+            dot(x, run, BLUE)
         previous = y
 
     lines = []
     for row in range(rows):
-        line = Text(f"{labels.get(row, ''):>{left - 2}}  ", style=MUTED)
+        label = labels.get(row, Text())
+        line = Text.assemble(
+            " " * (left - 2 - label.cell_len), label, "  ", style=MUTED
+        )
         for cell, color in zip(cells[row], colors[row], strict=True):
             line.append(chr(0x2800 + cell) if cell else " ", style=color)
         lines.append(line)

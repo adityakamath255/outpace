@@ -518,7 +518,7 @@ def test_pace_compares_whole_seconds():
     day = Day(date(2026, 11, 1), written("08:00-18:00"), (Section("", (task,)),))
     # earned is 54m32.7s; time is 54m32s
     lines = summary_lines(day, datetime(2026, 11, 1, 8, 54, 32))
-    assert any(line.startswith("pace 0s") for line in lines)
+    assert any(line.startswith("pace 0 ") for line in lines)
 
 
 def test_the_table_leaves_out_columns_no_task_has_a_value_for():
