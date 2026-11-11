@@ -1484,7 +1484,17 @@ class ScheduleEditor(Form):
     async def action_add_row(self) -> None:
         row = self.row(None)
         await self.query_one("#intervals").mount(row, after=self.focused_row())
-        row.query_one(".start", Input).focus()
+        field = row.query_one(".start", Input)
+        # focus would scroll before the next layout, and Textual skips scrolling to
+        # a widget that has no size yet, so the new row could stay out of view. This
+        # scrolls as focus does, after the layout.
+        field.focus(scroll_visible=False)
+
+        def reveal() -> None:
+            if not self.can_view_entire(field):
+                self.scroll_to_center(field, origin_visible=True)
+
+        self.call_after_refresh(reveal)
 
     def action_move(self, offset: int) -> None:
         """Moves focus a row up or down, keeping its column. Below the last row is the

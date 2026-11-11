@@ -703,6 +703,24 @@ def test_schedule_editor_saves_rows_in_order_and_undoes(app):
     asyncio.run(edit_schedule())
 
 
+def test_up_and_down_move_between_rows_once_the_schedule_scrolls(app):
+    def focused_row():
+        rows = app.screen.query(".interval")
+        return [row.has_focus_within for row in rows].index(True)
+
+    async def move():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("at", *["plus"] * 4)
+            assert app.screen.query_one("#intervals").max_scroll_y > 0
+            assert focused_row() == 4
+            await pilot.press("up", "up")
+            assert focused_row() == 2
+            await pilot.press("down")
+            assert focused_row() == 3
+
+    asyncio.run(move())
+
+
 def test_schedule_editor_clears_and_names_the_field_it_cannot_read(app):
     def error():
         return str(app.screen.query_one("#error", Static).content)
