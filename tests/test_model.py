@@ -14,6 +14,7 @@ from todo.model import (
     days_text,
     empty_day,
     number,
+    pace_at,
     parse_clock,
     parse_days,
     parse_minutes,
@@ -276,13 +277,32 @@ def test_a_tally_is_kept_only_when_the_points_change():
     day = replace(empty_day(DAY), sections=(Section("", (Task("a", points("2")),)),))
     at = datetime(2026, 11, 1, 9, 0, 0, 500)
     counted = tallied(day, at)
-    assert counted.tallies == (
-        Tally(datetime(2026, 11, 1, 9), Fraction(0), Fraction(2)),
-    )
+    assert counted.tallies == (Tally(at, Fraction(0), Fraction(2)),)
     assert tallied(counted, at + timedelta(hours=1)) == counted
     # a list without points has nothing to graph
     empty = empty_day(DAY)
     assert tallied(empty, at) == empty
+
+
+def test_pace_at_a_moment_comes_from_the_last_tally_against_the_schedule():
+    tallies = (
+        Tally(datetime(2026, 11, 1, 7), Fraction(1), Fraction(4)),
+        Tally(datetime(2026, 11, 1, 10), Fraction(3), Fraction(4)),
+        Tally(datetime(2026, 11, 1, 11), Fraction(0), Fraction(0)),
+    )
+    day = Day(DAY, (Interval(8 * 60, 12 * 60),), (Section(""),), tallies)
+    hours = [6, 8, 9, 10]
+    assert [pace_at(day, datetime(2026, 11, 1, h)) for h in hours] == [
+        None,
+        HOUR,
+        0,
+        HOUR,
+    ]
+    # no points left to earn
+    assert pace_at(day, datetime(2026, 11, 1, 11, 30)) is None
+    after = replace(day, tallies=tallies[:2])
+    assert pace_at(after, datetime(2026, 11, 1, 13)) == -HOUR
+    assert pace_at(replace(after, intervals=()), datetime(2026, 11, 1, 9)) is None
 
 
 def test_percentages_truncate_and_per_point_needs_points():

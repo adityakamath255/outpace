@@ -81,31 +81,6 @@ def test_newer_database_is_not_modified(tmp_path):
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
-def test_a_version_2_database_keeps_its_days_and_gains_spans(tmp_path):
-    path = tmp_path / "todo.sqlite3"
-    day = planned(DAY)
-    with closing(Store(path)) as store:
-        store.save(day)
-    # as the previous version left it: days only
-    with closing(sqlite3.connect(path)) as connection, connection:
-        connection.execute("DROP TABLE spans")
-        connection.execute("PRAGMA user_version = 2")
-    span = Span(
-        "november",
-        datetime(2026, 11, 6, 10, 30),
-        datetime(2026, 12, 1),
-        planned(DAY).sections,
-    )
-    with closing(Store(path)) as store:
-        assert store.load(DAY) == day
-        assert store.spans() == ()
-        store.save(span)
-    with closing(Store(path)) as store:
-        assert store.spans() == (span,)
-        store.delete_span(span.id)
-        assert store.spans() == ()
-
-
 def test_tallies_and_days_off_survive_a_save_and_older_spans_have_neither(tmp_path):
     tallies = (Tally(datetime(2026, 11, 6, 11, 2, 5), Fraction(1, 2), Fraction(2)),)
     span = Span(

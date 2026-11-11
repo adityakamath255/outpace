@@ -4,6 +4,7 @@ import sys
 from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime, timedelta
+from fractions import Fraction
 from io import StringIO
 
 import pytest
@@ -28,6 +29,7 @@ from todo.app import (
     duration,
     header_row,
     main,
+    pace_graph,
     schedule_row,
     subtotal_row,
 )
@@ -37,6 +39,7 @@ from todo.model import (
     Interval,
     Section,
     Span,
+    Tally,
     Task,
     empty_day,
     parse_clock,
@@ -125,7 +128,7 @@ def test_task_changes_save_and_undo(app):
     async def exercise_tasks():
         async with app.run_test(size=(110, 45)) as pilot:
             await pilot.pause()
-            assert await pilot.click(footer_action(app, "add(True)"))
+            assert await pilot.click(footer_action(app, "app.add(True)"))
             await pilot.press(*"read daily", "tab", *"2.5", "tab", *"20", "enter")
             added = next(task for task in app.day.tasks() if task.title == "read daily")
             assert (added.available, added.earned, added.minutes) == (
@@ -170,7 +173,7 @@ def test_task_changes_save_and_undo(app):
             await pilot.press("u")
             assert app.day == before_move
 
-            assert await pilot.click(footer_action(app, "delete"))
+            assert await pilot.click(footer_action(app, "app.delete"))
             assert all(task.id != added.id for task in app.day.tasks())
             await pilot.press("u")
             assert app.day == before_move
@@ -338,6 +341,54 @@ def test_points_changes_are_tallied_and_undo_and_redo_take_the_tally_along(app):
     asyncio.run(change())
 
 
+def test_the_graph_joins_a_fall_from_its_top_row():
+    # +1h at 08:00, then new points drop pace below zero a minute later
+    tallies = (
+        Tally(datetime(2026, 11, 1, 7), Fraction(1), Fraction(1)),
+        Tally(datetime(2026, 11, 1, 8, 1), Fraction(1), Fraction(100)),
+    )
+    day = Day(date(2026, 11, 1), (Interval(8 * 60, 9 * 60),), (Section(""),), tallies)
+    plot = pace_graph(day, datetime(2026, 11, 1, 9), 80, 12).plain.splitlines()[:-1]
+    first = min(i for line in plot for i, c in enumerate(line) if "⠁" <= c <= "⣿")
+    drawn = [row for row, line in enumerate(plot) if line[first : first + 3].strip()]
+    assert drawn == list(range(drawn[0], drawn[-1] + 1))
+
+
+def test_the_graph_fits_a_span_weeks_behind():
+    span = Span(
+        "",
+        datetime(2026, 10, 1),
+        datetime(2026, 11, 1),
+        (Section(""),),
+        tallies=(Tally(datetime(2026, 10, 1), Fraction(0), Fraction(1)),),
+    )
+    lines = pace_graph(span, datetime(2026, 10, 30), 80, 12).plain.splitlines()
+    assert len(lines) == 12
+
+
+def test_v_swaps_the_tasks_for_the_graph_where_task_keys_do_nothing(app):
+    async def view():
+        async with app.run_test() as pilot:
+            await pilot.press("space")
+            await pilot.press("v")
+            assert app.query_one("#graph").display
+            assert not app.query_one("#task-pane").display
+            before = app.day
+            await pilot.press("space", "x", "o")
+            assert app.day == before and app.screen is app.screen_stack[0]
+            # undo still works, and takes the graph back with it
+            await pilot.press("u")
+            assert app.day.tallies == ()
+            # tab still switches to spans, here to a new one
+            await pilot.press("tab")
+            assert isinstance(app.screen, SpanEditor)
+            await pilot.press("escape", "v")
+            assert app.query_one("#task-pane").display
+            assert isinstance(app.focused, VimList)
+
+    asyncio.run(view())
+
+
 def test_plus_and_minus_step_points_and_undo_names_the_change(app, monkeypatch):
     messages = []
     monkeypatch.setattr(
@@ -395,7 +446,7 @@ def test_help_fits_without_scrolling_at_120_by_35(app):
 
 
 def test_help_lists_every_key_binding(app):
-    from todo.app import HELP, TaskList
+    from todo.app import HELP, ListArea, TaskList
 
     documented = {
         key
@@ -404,7 +455,12 @@ def test_help_lists_every_key_binding(app):
         for keys, _ in rows
         for key in keys.split()
     }
-    bindings = [*TodoApp.BINDINGS, *VimList.BINDINGS, *TaskList.BINDINGS]
+    bindings = [
+        *TodoApp.BINDINGS,
+        *VimList.BINDINGS,
+        *TaskList.BINDINGS,
+        *ListArea.BINDINGS,
+    ]
     displays = {
         app.get_key_display(binding.with_key(key))
         for binding in bindings
@@ -1049,6 +1105,9 @@ def test_sorting_lists_tasks_across_sections_and_changes_only_the_view(app):
             assert await pilot.click("#columns", offset=(per_point, 0))
             assert shown() == [first.id, a.id, second.id, b.id, c.id]
             assert app.store.load(day.date) == day
+            # the task keys still work after a click on a column name
+            await pilot.press("s")
+            assert isinstance(app.screen, ModalScreen)
 
     asyncio.run(sort())
 

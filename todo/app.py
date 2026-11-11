@@ -1,10 +1,11 @@
 import argparse
 import sqlite3
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from fractions import Fraction
+from itertools import chain
 from pathlib import Path
 from typing import Literal, NamedTuple
 
@@ -22,6 +23,7 @@ from textual.message import Message
 from textual.screen import ModalScreen
 from textual.theme import Theme
 from textual.widgets import (
+    ContentSwitcher,
     Footer,
     Input,
     Label,
@@ -42,6 +44,7 @@ from .model import (
     fresh_copy,
     interval_text,
     number,
+    pace_at,
     parse_clock,
     parse_date,
     parse_days,
@@ -49,6 +52,7 @@ from .model import (
     per_point,
     percentage,
     points,
+    progress,
     schedule,
     score,
     seconds_since,
@@ -464,12 +468,18 @@ GUTTER = 2
 SHARE_WIDTH = len("100.00%")
 
 
+def signed(seconds: int) -> str:
+    if not seconds:
+        return "0"
+    return ("+" if seconds > 0 else "-") + duration(abs(seconds)).plain
+
+
+def pace_color(ahead: int) -> str:
+    return GREEN if ahead > 0 else YELLOW if ahead < 0 else TEXT
+
+
 def pace(ahead: int) -> Text:
-    """Signed, in green when ahead and yellow when behind."""
-    if not ahead:
-        return duration(0)
-    sign, color = ("+", GREEN) if ahead > 0 else ("-", YELLOW)
-    return Text(sign + duration(abs(ahead)).plain, style=color)
+    return Text(signed(ahead), style=pace_color(ahead)) if ahead else duration(0)
 
 
 def moment(value: datetime) -> str:
@@ -616,8 +626,7 @@ class Summary:
 
         progress_row = pace_row = free_row = None
         if scheduled and available:
-            # whole seconds, so pace equals progress minus elapsed as displayed
-            worth = int(scheduled * earned / available)
+            worth = progress(scheduled, earned, available)
             progress_row = ("progress", duration(worth))
             pace_row = ("pace", pace(worth - elapsed))
         if scheduled and needed:
@@ -703,6 +712,169 @@ class Summary:
             yield line
 
 
+# seconds between pace labels, and minutes between time labels, before doubling
+PACE_STEPS = (300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
+TIME_STEPS = (15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080)
+# braille dot bits by column, then row, within a cell
+DOTS = ((0x01, 0x02, 0x04, 0x40), (0x08, 0x10, 0x20, 0x80))
+
+
+def doubling(step: int) -> Iterator[int]:
+    while True:
+        yield step
+        step *= 2
+
+
+def pace_scale(low: int, high: int, rows: int) -> tuple[int, int, int]:
+    """The seconds and rows between pace labels, and the row of zero, for the finest
+    scale that fits low to high in rows (at least two), with labels two to four rows
+    apart. Of equally fine scales, the one with fewer labels."""
+
+    def zero_row(step: int, per_step: int) -> int | None:
+        zero = -(-max(high, 0) * per_step // step)
+        dots_below = -(-max(-low, 0) * per_step * 4 // step)
+        return zero if zero * 4 + dots_below <= rows * 4 - 1 else None
+
+    finest_first = sorted(
+        ((step, per_step) for step in PACE_STEPS for per_step in (2, 3, 4)),
+        key=lambda scale: (Fraction(*scale), -scale[0]),
+    )
+    wider = ((step, 4) for step in doubling(PACE_STEPS[-1] * 2))
+    return next(
+        (step, per_step, zero)
+        for step, per_step in chain(finest_first, wider)
+        if (zero := zero_row(step, per_step)) is not None
+    )
+
+
+def time_axis(start: datetime, end: datetime, left: int, cells: int) -> Text:
+    """Times from start to end under cells columns that begin left cells in, each
+    centred on its moment, at a step that leaves room between them."""
+    minutes = (end - start).total_seconds() / 60
+    every = next(
+        m
+        for m in chain(TIME_STEPS, doubling(TIME_STEPS[-1] * 2))
+        if cells * m / minutes >= 8
+    )
+    midnight = datetime.combine(start.date(), time())
+    moment = midnight + timedelta(
+        minutes=-(-int((start - midnight).total_seconds() / 60) // every) * every
+    )
+    axis = Text(style=MUTED)
+    while moment <= end:
+        text = f"{moment:%H:%M}" if every < 1440 else f"{moment:%m-%d}"
+        column = left + round(
+            (moment - start).total_seconds() / 60 / minutes * (cells - 1)
+        )
+        at = column - len(text) // 2
+        if (
+            at >= axis.cell_len + (1 if axis.cell_len else 0)
+            and at + len(text) <= left + cells
+        ):
+            axis.append(" " * (at - axis.cell_len) + text)
+        moment += timedelta(minutes=every)
+    return axis
+
+
+class GraphView(Static, can_focus=True):
+    """Takes focus while it shows, which leaves the task list's keys off."""
+
+
+class PaceGraph:
+    """Pace from the first scheduled minute to the last, drawn up to now in braille
+    dots (two columns and four rows to a cell), above a line of times. It fills the
+    height it is given."""
+
+    def __init__(self, plan: Day | Span, now: datetime):
+        self.plan = plan
+        self.now = now
+
+    def __rich_console__(
+        self, console: Console, options: ConsoleOptions
+    ) -> RenderResult:
+        yield pace_graph(self.plan, self.now, options.max_width, options.height or 0)
+
+
+def pace_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text:
+    if not plan.intervals:
+        return Text("no schedule to keep pace with", style=MUTED)
+    if not any(tally.available for tally in plan.tallies):
+        return Text("the graph starts with the next change to points", style=MUTED)
+    start = plan.origin + timedelta(minutes=plan.intervals[0].start)
+    end = plan.origin + timedelta(minutes=plan.intervals[-1].end)
+    stop = min(now, end)
+    if stop < start:
+        return Text("pace shows once the schedule starts", style=MUTED)
+    rows = height - 1
+    if rows < 2:
+        return Text()
+
+    # pace falls steadily between tallies, so its extremes are at the ends and on
+    # either side of each tally
+    moments = [start, stop]
+    for tally in plan.tallies:
+        if start < tally.at <= stop:
+            moments += [tally.at - timedelta(seconds=1), tally.at]
+    values = [v for v in (pace_at(plan, m) for m in moments) if v is not None]
+    step, per_step, zero = pace_scale(
+        min(values, default=0), max(values, default=0), rows
+    )
+    labels = {
+        row: signed((zero - row) // per_step * step)
+        for row in range(zero % per_step, rows, per_step)
+    }
+    left = max(len(label) for label in labels.values()) + 2
+    plot_width = width - left
+    if plot_width < 10:
+        return Text()
+
+    def dot_row(value: int) -> int:
+        return zero * 4 - round(value / step * per_step * 4)
+
+    cells = [[0] * plot_width for _ in range(rows)]
+    colors = [[RULE] * plot_width for _ in range(rows)]
+
+    def dot(x: int, y: int, color: str) -> None:
+        cells[y // 4][x // 2] |= DOTS[x % 2][y % 4]
+        colors[y // 4][x // 2] = color
+
+    columns = plot_width * 2
+    for x in range(0, columns, 3):
+        dot(x, dot_row(0), RULE)
+    previous = None
+    for x in range(columns):
+        moment = start + (end - start) * x / (columns - 1)
+        if moment > stop:
+            break
+        value = pace_at(plan, moment)
+        if value is None:
+            previous = None
+            continue
+        y = dot_row(value)
+        # a vertical run joins a jump at a tally
+        joined = y if previous is None else previous
+        for run in range(min(y, joined), max(y, joined) + 1):
+            dot(x, run, pace_color(value))
+        previous = y
+
+    lines = []
+    for row in range(rows):
+        line = Text(f"{labels.get(row, ''):>{left - 2}}  ", style=MUTED)
+        for cell, color in zip(cells[row], colors[row], strict=True):
+            line.append(chr(0x2800 + cell) if cell else " ", style=color)
+        lines.append(line)
+    lines.append(time_axis(start, end, left, plot_width))
+    return Text("\n").join(lines)
+
+
+class ListArea(ContentSwitcher):
+    """The task list, or the pace graph in its place. Its keys work in both."""
+
+    # Screen binds tab to focus_next, which runs before app bindings, and a priority
+    # binding would also catch tab in dialogs
+    BINDINGS = [Binding("tab", "app.toggle_mode", "Days or spans", show=False)]
+
+
 def plan_key(plan: Day | Span) -> date | str:
     match plan:
         case Day():
@@ -783,6 +955,7 @@ HELP = (
                 ("T", "open a date, or the spans"),
                 ("c", "replace this list with another's"),
                 ("@", "edit the schedule, or a span's title and time"),
+                ("v", "show the pace graph, or the tasks again"),
             ),
         ),
         ("App", (("?", "show this list"), ("q", "quit"))),
@@ -841,9 +1014,26 @@ class TaskList(VimList):
     """A click moves the cursor and does nothing else, and a right-click also asks for
     the row menu."""
 
-    # Screen binds tab to focus_next, which runs before app bindings, and a priority
-    # binding would also catch tab in dialogs
-    BINDINGS = [Binding("tab", "app.toggle_mode", "Days or spans", show=False)]
+    # on the list, so they stop while it is hidden
+    BINDINGS = [
+        Binding("o", "app.add(True)", "add"),
+        Binding("O", "app.add(False)", "add above", show=False),
+        Binding("#", "app.new_section", "section"),
+        Binding("e", "app.edit", "edit"),
+        Binding("space", "app.complete", "done"),
+        Binding("plus", "app.step(1)", "points", key_display="+/-"),
+        Binding("minus", "app.step(-1)", "points down", show=False),
+        Binding("x", "app.delete", "delete"),
+        Binding("delete", "app.delete", "delete", show=False),
+        Binding("p", "app.put(True)", "put", show=False),
+        Binding("P", "app.put(False)", "put above", show=False),
+        Binding("s", "app.sort", "sort", show=False),
+        Binding("f", "app.toggle_done", "hide done", show=False),
+        Binding("J", "app.move(1)", "move down", show=False),
+        Binding("K", "app.move(-1)", "move up", show=False),
+        Binding("}", "app.jump_section(1)", "next section", show=False),
+        Binding("{", "app.jump_section(-1)", "previous section", show=False),
+    ]
 
     class MenuRequested(Message):
         def __init__(self, screen_offset: Offset):
@@ -1662,17 +1852,6 @@ class TodoApp(App):
     TITLE = "todo"
     ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
-        Binding("o", "add(True)", "add"),
-        Binding("O", "add(False)", "add above", show=False),
-        Binding("#", "new_section", "section"),
-        Binding("e", "edit", "edit"),
-        Binding("space", "complete", "done"),
-        Binding("plus", "step(1)", "points", key_display="+/-"),
-        Binding("minus", "step(-1)", "points down", show=False),
-        Binding("x", "delete", "delete"),
-        Binding("delete", "delete", "delete", show=False),
-        Binding("p", "put(True)", "put", show=False),
-        Binding("P", "put(False)", "put above", show=False),
         Binding("u", "undo", "undo"),
         Binding("ctrl+r", "redo", "redo", show=False),
         # check_action picks which one shows
@@ -1680,16 +1859,11 @@ class TodoApp(App):
         Binding("@", "edit_time('spans')", "span"),
         Binding("question_mark", "help", "keys"),
         Binding("c", "copy", "copy", show=False),
-        Binding("s", "sort", "sort", show=False),
-        Binding("f", "toggle_done", "hide done", show=False),
-        Binding("J", "move(1)", "move down", show=False),
-        Binding("K", "move(-1)", "move up", show=False),
-        Binding("}", "jump_section(1)", "next section", show=False),
-        Binding("{", "jump_section(-1)", "previous section", show=False),
         Binding("T", "choose", "choose", show=False),
         Binding("[", "shift(-1)", "previous", show=False),
         Binding("]", "shift(1)", "next", show=False),
         Binding("t", "today", "today", show=False),
+        Binding("v", "toggle_graph", "graph", show=False),
         # no room in the footer at 80 columns
         Binding("q", "quit", "quit", show=False),
     ]
@@ -1756,7 +1930,9 @@ class TodoApp(App):
         with Vertical(id="summary"):
             yield LineButton("", "app.edit_time", id="schedule")
             yield Static("", id="totals")
-        yield TaskPane(id="task-pane")
+        with ListArea(initial="task-pane"):
+            yield TaskPane(id="task-pane")
+            yield GraphView(id="graph")
         yield Footer(compact=True)
 
     def on_mount(self) -> None:
@@ -1872,7 +2048,20 @@ class TodoApp(App):
     def refresh_stats(self) -> None:
         if not self.is_running:
             return
-        self.query_one("#totals", Static).update(Summary(self.plan, datetime.now()))
+        now = datetime.now()
+        self.query_one("#totals", Static).update(Summary(self.plan, now))
+        if self.query_one(ListArea).current == "graph":
+            self.query_one("#graph", Static).update(PaceGraph(self.plan, now))
+
+    def action_toggle_graph(self) -> None:
+        area = self.query_one(ListArea)
+        if area.current == "graph":
+            area.current = "task-pane"
+            self.query_one("#tasks", VimList).focus()
+        else:
+            area.current = "graph"
+            self.query_one(GraphView).focus()
+        self.refresh_stats()
 
     @on(TaskList.MenuRequested)
     def open_row_menu(self, event: TaskList.MenuRequested) -> None:

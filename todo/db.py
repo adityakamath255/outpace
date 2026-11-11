@@ -7,9 +7,7 @@ from typing import Any
 
 from .model import Day, Interval, Section, Span, Tally, Task, empty_day
 
-# version 3 added the spans table; version 2 databases get it on open
 VERSION = 3
-SPANS_TABLE = "CREATE TABLE spans (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
 
 
 def encode_sections(sections: tuple[Section, ...]) -> list[dict[str, Any]]:
@@ -145,9 +143,9 @@ class Store:
                     self.connection.execute(
                         "CREATE TABLE days (date TEXT PRIMARY KEY, data TEXT NOT NULL)"
                     )
-                    self.connection.execute(SPANS_TABLE)
-                elif version == 2:
-                    self.connection.execute(SPANS_TABLE)
+                    self.connection.execute(
+                        "CREATE TABLE spans (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
+                    )
                 elif version != VERSION:
                     raise ValueError(
                         f"Unsupported database version {version}; expected {VERSION}."

@@ -234,16 +234,11 @@ def seconds_since(origin: datetime, now: datetime) -> int:
 
 @dataclass(frozen=True)
 class Tally:
-    """A list's earned and available points as of a moment, to the second, which is
-    all the store keeps."""
+    """A list's earned and available points as of a moment."""
 
     at: datetime
     earned: Fraction
     available: Fraction
-
-    def __post_init__(self) -> None:
-        if self.at.tzinfo or self.at.microsecond:
-            raise ValueError("A tally is a local time to the second.")
 
 
 class Plan:
@@ -470,8 +465,32 @@ def tallied(plan: Day | Span, now: datetime) -> Day | Span:
     )
     if (earned, available) == last:
         return plan
-    tally = Tally(now.replace(microsecond=0), earned, available)
-    return replace(plan, tallies=(*plan.tallies, tally))
+    return replace(plan, tallies=(*plan.tallies, Tally(now, earned, available)))
+
+
+def progress(scheduled: int, earned: Fraction, available: Fraction) -> int:
+    """earned points as whole seconds of the schedule, so pace, progress minus
+    elapsed, agrees with the figures shown."""
+    return int(scheduled * earned / available)
+
+
+def pace_at(plan: Day | Span, moment: datetime) -> int | None:
+    """Seconds ahead of the schedule at moment, as the summary's pace counts them,
+    from the last tally at or before it. None before the first tally, and without
+    points or a schedule."""
+    tally = None
+    for candidate in plan.tallies:
+        if candidate.at > moment:
+            break
+        tally = candidate
+    if tally is None or not tally.available:
+        return None
+    elapsed, scheduled = time_progress(
+        plan.intervals, seconds_since(plan.origin, moment)
+    )
+    if not scheduled:
+        return None
+    return progress(scheduled, tally.earned, tally.available) - elapsed
 
 
 def empty_day(day: date) -> Day:
