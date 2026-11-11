@@ -337,6 +337,30 @@ def test_plus_and_minus_step_points_and_undo_names_the_change(app, monkeypatch):
     asyncio.run(step())
 
 
+def test_a_long_schedule_keeps_its_buttons_and_focused_row_at_80_by_24(app):
+    def assert_in_view():
+        screen = app.screen
+        dialog = screen.query_one("#schedule-dialog").region
+        rows = screen.query_one("#intervals").region
+        focused = app.focused
+        assert focused is not None and rows.contains_region(focused.region)
+        for widget in (focused, *screen.query(".button")):
+            assert dialog.contains_region(widget.region)
+
+    async def add_rows():
+        async with app.run_test(size=(80, 24)) as pilot:
+            await pilot.press("@", *["plus"] * 8)
+            await pilot.wait_for_scheduled_animations()
+            assert_in_view()
+            # the longest errors take two lines
+            await pilot.press("9", "9", "enter")
+            await pilot.wait_for_scheduled_animations()
+            assert app.screen.query_one("#error").display
+            assert_in_view()
+
+    asyncio.run(add_rows())
+
+
 def test_help_fits_without_scrolling_at_120_by_35(app):
     async def open_help():
         async with app.run_test(size=(120, 35)) as pilot:

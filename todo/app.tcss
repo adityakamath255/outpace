@@ -366,8 +366,13 @@ HelpScreen.-wide #help-right {
     margin: 0 0 0 4;
 }
 
+/* four intervals, so the dialog fits 80x24 with a two-line error */
 #intervals {
     height: auto;
+    max-height: 8;
+    scrollbar-size: 1 1;
+    scrollbar-background: $background;
+    scrollbar-color: $surface2;
 }
 
 .interval {

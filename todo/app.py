@@ -1224,7 +1224,7 @@ class ScheduleEditor(Form):
                 classes="muted",
                 markup=False,
             )
-            with Vertical(id="intervals"):
+            with VerticalScroll(id="intervals"):
                 for interval in self.intervals or (None,):
                     yield self.row(interval)
             with Horizontal(id="row-actions"):
