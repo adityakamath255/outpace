@@ -1,4 +1,5 @@
 import re
+from bisect import bisect_right
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta
@@ -37,6 +38,12 @@ def parse_minutes(value: str) -> int | None:
         raise ValueError(_DURATION_ERROR)
     hours, minutes = (int(part or 0) for part in match.groups())
     return hours * 60 + minutes
+
+
+def minutes_text(minutes: int) -> str:
+    """Writes minutes the way parse_minutes reads them, such as 1h30m or 24h."""
+    hours, rest = divmod(minutes, 60)
+    return (f"{hours}h" if hours else "") + (f"{rest}m" if rest or not hours else "")
 
 
 @dataclass(frozen=True)
@@ -475,13 +482,10 @@ def progress(scheduled: int, earned: Fraction, available: Fraction) -> int:
 
 
 def tally_at(plan: Day | Span, moment: datetime) -> Tally | None:
-    """The last tally at or before moment, or None before the first."""
-    tally = None
-    for candidate in plan.tallies:
-        if candidate.at > moment:
-            break
-        tally = candidate
-    return tally
+    """The last tally at or before moment, or None before the first. Tallies are in
+    time order."""
+    index = bisect_right(plan.tallies, moment, key=lambda tally: tally.at)
+    return plan.tallies[index - 1] if index else None
 
 
 def pace_at(plan: Day | Span, moment: datetime) -> int | None:

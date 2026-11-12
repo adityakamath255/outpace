@@ -21,6 +21,7 @@ from todo.app import (
     Sort,
     SpanEditor,
     SpanManager,
+    SpanPicker,
     Summary,
     TodoApp,
     VimList,
@@ -257,6 +258,24 @@ def test_failed_save_keeps_form_and_does_not_change_history(app, monkeypatch):
             assert app.store.load(original.date) == original
 
     asyncio.run(fail_save())
+
+
+def test_editing_only_the_title_keeps_a_day_long_duration(app):
+    long = replace(
+        app.day, sections=(Section("", (Task("Long", None, minutes=1440),)),)
+    )
+    app.store.save(long)
+    app = TodoApp(app.store, long.date)
+
+    async def edit_title():
+        async with app.run_test(size=(110, 45)) as pilot:
+            await pilot.press("e")
+            app.screen.query_one("#title", Input).value = "Longer"
+            await pilot.press("enter")
+            assert not isinstance(app.screen, ModalScreen)
+            assert [(t.title, t.minutes) for t in app.day.tasks()] == [("Longer", 1440)]
+
+    asyncio.run(edit_title())
 
 
 def test_selected_sections_are_renamed_and_blank_means_untitled(app):
@@ -1308,3 +1327,33 @@ def test_the_picker_deletes_spans_moving_on_and_restores_them(app):
             assert app.showing_spans and app.plan == second
 
     asyncio.run(delete())
+
+
+def test_failed_span_writes_keep_the_picker_and_the_deleted_span(app, monkeypatch):
+    first, second = week("first"), week("second", datetime(2026, 11, 9))
+    app.store.save(first)
+    app.store.save(second)
+
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    async def fail_writes():
+        async with app.run_test(size=(120, 35)) as pilot:
+            await pilot.press("tab")
+            app.open_span(first)
+            await pilot.press("T", "x")
+            with monkeypatch.context() as patch:
+                patch.setattr(app.store, "save", fail)
+                await pilot.press("u")
+            assert isinstance(app.screen, SpanManager)
+            assert app.store.spans() == (second,)
+            await pilot.press("u")
+            assert app.store.spans() == (first, second)
+            await pilot.press("escape", "c")
+            with monkeypatch.context() as patch:
+                patch.setattr(app.store, "save", fail)
+                await pilot.press("enter")
+            assert isinstance(app.screen, SpanPicker)
+            assert app.plan == second and app.store.spans() == (first, second)
+
+    asyncio.run(fail_writes())

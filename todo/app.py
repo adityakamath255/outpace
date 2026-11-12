@@ -43,6 +43,7 @@ from .model import (
     days_text,
     fresh_copy,
     interval_text,
+    minutes_text,
     number,
     on_pace_at,
     pace_at,
@@ -1391,7 +1392,7 @@ class TaskEditor(Form):
                 )
                 yield Label("duration")
                 yield Input(
-                    duration(task.minutes * 60).plain
+                    minutes_text(task.minutes)
                     if task and task.minutes is not None
                     else "",
                     id="minutes",
@@ -1833,7 +1834,8 @@ def picker_lines(spans: tuple[Span, ...], now: datetime) -> list[Text]:
 
 
 class SpanPicker(ModalScreen):
-    """The spans, latest start first, under title. Choosing one calls on_choose."""
+    """The spans, latest start first, under title. Choosing one calls on_choose, which
+    raises a RECOVERABLE error to keep the picker open."""
 
     BINDINGS = [("escape", "dismiss", "Close")]
 
@@ -1882,13 +1884,18 @@ class SpanPicker(ModalScreen):
 
     @on(OptionList.OptionSelected)
     def choose(self, event: OptionList.OptionSelected) -> None:
+        try:
+            self.on_choose(self.spans[event.option_index])
+        except RECOVERABLE as error:
+            self.app.notify(str(error), title="Could not save", severity="error")
+            return
         self.dismiss()
-        self.on_choose(self.spans[event.option_index])
 
 
 class SpanManager(SpanPicker):
     """The span picker that also adds spans and deletes and restores them. delete and
-    restore return the spans left, or None from restore when nothing was deleted."""
+    restore return the spans left, or None from restore when nothing was deleted, and
+    raise a RECOVERABLE error when that fails."""
 
     BINDINGS = [
         Binding("o", "new", "New span", show=False),
@@ -1931,14 +1938,23 @@ class SpanManager(SpanPicker):
         if index is None:
             return
         span = self.spans[index]
-        self.show(self.delete(span), None)
+        try:
+            left = self.delete(span)
+        except RECOVERABLE as error:
+            self.app.notify(str(error), title="Could not delete", severity="error")
+            return
+        self.show(left, None)
         name = span.title or span_text(span)
         self.app.notify(
             f"Deleted {name}; restore brings it back.", timeout=4, markup=False
         )
 
     def action_restore(self) -> None:
-        restored = self.restore()
+        try:
+            restored = self.restore()
+        except RECOVERABLE as error:
+            self.app.notify(str(error), title="Could not restore", severity="error")
+            return
         if restored is None:
             self.app.notify("No deleted span to restore.", timeout=2)
             return
@@ -2059,7 +2075,9 @@ class TodoApp(App):
 
     def action_shift(self, offset: int) -> None:
         if self.showing_spans:
-            spans = self.store.spans()
+            spans = self.saved_spans()
+            if spans is None:
+                return
             index = [plan_key(s) for s in spans].index(plan_key(self.plan)) + offset
             if 0 <= index < len(spans):
                 self.open_span(spans[index])
@@ -2452,13 +2470,23 @@ class TodoApp(App):
         if self.span is not None:
             self.open_span(self.span)
             return
-        spans = self.store.spans()
+        spans = self.saved_spans()
+        if spans is None:
+            return
         if not spans:
             self.new_span()
             return
         now = datetime.now()
         current = [s for s in spans if s.start <= now < s.end]
         self.open_span((current or list(spans))[-1])
+
+    def saved_spans(self) -> tuple[Span, ...] | None:
+        """All spans, or None after saying they could not be read."""
+        try:
+            return self.store.spans()
+        except RECOVERABLE as error:
+            self.notify(str(error), title="Could not read spans", severity="error")
+            return None
 
     def open_span(self, span: Span) -> None:
         self.span = span
@@ -2476,9 +2504,12 @@ class TodoApp(App):
         self.push_screen(SpanEditor(None, create))
 
     def choose_span(self) -> None:
+        spans = self.saved_spans()
+        if spans is None:
+            return
         self.push_screen(
             SpanManager(
-                self.store.spans(),
+                spans,
                 self.open_span,
                 self.span.id if self.span is not None else None,
                 new=self.new_span,
@@ -2489,7 +2520,10 @@ class TodoApp(App):
 
     def copy_span(self) -> None:
         open_id = plan_key(self.plan)
-        sources = tuple(s for s in self.store.spans() if s.id != open_id)
+        spans = self.saved_spans()
+        if spans is None:
+            return
+        sources = tuple(s for s in spans if s.id != open_id)
         if not sources:
             self.notify("No other spans yet.")
             return
@@ -2525,7 +2559,8 @@ class TodoApp(App):
         was deleted."""
         if not self.deleted_spans:
             return None
-        self.store.save(self.deleted_spans.pop())
+        self.store.save(self.deleted_spans[-1])
+        self.deleted_spans.pop()
         return self.store.spans()
 
     def action_complete(self) -> None:
