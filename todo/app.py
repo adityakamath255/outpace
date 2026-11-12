@@ -44,6 +44,7 @@ from .model import (
     fresh_copy,
     interval_text,
     number,
+    on_pace_at,
     pace_at,
     parse_clock,
     parse_date,
@@ -57,6 +58,7 @@ from .model import (
     score,
     seconds_since,
     tallied,
+    tally_at,
     time_progress,
     work,
 )
@@ -704,8 +706,10 @@ class Summary:
             yield line
 
 
-# seconds between pace labels, and minutes between time labels, before doubling
+# steps between labels before they start doubling: seconds of pace, points, and
+# minutes of time
 PACE_STEPS = (300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400)
+POINT_STEPS = (1, 2, 5, 10, 20, 50, 100)
 TIME_STEPS = (15, 30, 60, 120, 180, 360, 720, 1440, 2880, 10080)
 # braille dot bits by column, then row, within a cell
 DOTS = ((0x01, 0x02, 0x04, 0x40), (0x08, 0x10, 0x20, 0x80))
@@ -717,10 +721,12 @@ def doubling(step: int) -> Iterator[int]:
         step *= 2
 
 
-def pace_scale(low: int, high: int, rows: int) -> tuple[int, int, int]:
-    """The seconds and rows between pace labels, and the row of zero, for the finest
-    scale that fits low to high in rows (at least two), with labels two to four rows
-    apart. Of equally fine scales, the one with fewer labels."""
+def scale(
+    low: Fraction | int, high: Fraction | int, rows: int, steps: tuple[int, ...]
+) -> tuple[int, int, int]:
+    """The units and rows between labels, and the row of zero, for the finest scale
+    that fits low to high in rows (at least two), with labels two to four rows apart.
+    Of equally fine scales, the one with fewer labels."""
 
     def zero_row(step: int, per_step: int) -> int | None:
         zero = -(-max(high, 0) * per_step // step)
@@ -728,10 +734,10 @@ def pace_scale(low: int, high: int, rows: int) -> tuple[int, int, int]:
         return zero if zero * 4 + dots_below <= rows * 4 - 1 else None
 
     finest_first = sorted(
-        ((step, per_step) for step in PACE_STEPS for per_step in (2, 3, 4)),
-        key=lambda scale: (Fraction(*scale), -scale[0]),
+        ((step, per_step) for step in steps for per_step in (2, 3, 4)),
+        key=lambda candidate: (Fraction(*candidate), -candidate[0]),
     )
-    wider = ((step, 4) for step in doubling(PACE_STEPS[-1] * 2))
+    wider = ((step, 4) for step in doubling(steps[-1] * 2))
     return next(
         (step, per_step, zero)
         for step, per_step in chain(finest_first, wider)
@@ -772,22 +778,41 @@ class GraphView(Static, can_focus=True):
     """Takes focus while it shows, which leaves the task list's keys off."""
 
 
-class PaceGraph:
-    """Pace from the first scheduled minute to the last, drawn up to now in braille
-    dots (two columns and four rows to a cell), above a line of times. It fills the
-    height it is given."""
+class Graph:
+    """One of plan's graphs, drawn by draw to fill the width and height it is
+    given."""
 
-    def __init__(self, plan: Day | Span, now: datetime):
+    def __init__(
+        self,
+        draw: Callable[[Day | Span, datetime, int, int], Text],
+        plan: Day | Span,
+        now: datetime,
+    ):
+        self.draw = draw
         self.plan = plan
         self.now = now
 
     def __rich_console__(
         self, console: Console, options: ConsoleOptions
     ) -> RenderResult:
-        yield pace_graph(self.plan, self.now, options.max_width, options.height or 0)
+        yield self.draw(self.plan, self.now, options.max_width, options.height or 0)
 
 
-def pace_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text:
+class Trace(NamedTuple):
+    """A line of values over the schedule, drawn up to until. A solid trace joins its
+    jumps with vertical runs; a dotted one takes every third dot column."""
+
+    value: Callable[[datetime], Fraction | int | None]
+    until: datetime
+    color: str
+    dotted: bool = False
+
+
+def schedule_bounds(
+    plan: Day | Span, now: datetime
+) -> tuple[datetime, datetime, datetime] | Text:
+    """The first and last scheduled moments, and the earlier of now and the last; or
+    a message saying why there is nothing to draw."""
     if not plan.intervals:
         return Text("no schedule to keep pace with", style=MUTED)
     if not any(tally.available for tally in plan.tallies):
@@ -796,23 +821,35 @@ def pace_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text
     end = plan.origin + timedelta(minutes=plan.intervals[-1].end)
     stop = min(now, end)
     if stop < start:
-        return Text("pace shows once the schedule starts", style=MUTED)
+        return Text("the graph shows once the schedule starts", style=MUTED)
+    return start, end, stop
+
+
+def plot(
+    start: datetime,
+    end: datetime,
+    width: int,
+    height: int,
+    low: Fraction | int,
+    high: Fraction | int,
+    steps: tuple[int, ...],
+    label: Callable[[int], Text],
+    traces: Iterable[Trace],
+    zero_at_bottom: bool = False,
+) -> Text:
+    """traces from start to end in braille dots (two columns and four rows to a cell),
+    each cell in the colour of its last trace, with labels on the left at the scale
+    that fits low to high, and a line of times below. Every value must lie within low
+    to high. Rows the values leave spare go below zero, or above the values with
+    zero_at_bottom. Empty when width or height leave no room."""
     rows = height - 1
     if rows < 2:
         return Text()
-
-    # pace falls steadily between tallies, so its extremes are at the ends and on
-    # either side of each tally
-    moments = [start, stop]
-    for tally in plan.tallies:
-        if start < tally.at <= stop:
-            moments += [tally.at - timedelta(seconds=1), tally.at]
-    values = [v for v in (pace_at(plan, m) for m in moments) if v is not None]
-    step, per_step, zero = pace_scale(
-        min(values, default=0), max(values, default=0), rows
-    )
+    step, per_step, zero = scale(low, high, rows, steps)
+    if zero_at_bottom:
+        zero = rows - 1
     labels = {
-        row: signed((zero - row) // per_step * step)
+        row: label((zero - row) // per_step * step)
         for row in range(zero % per_step, rows, per_step)
     }
     left = max(label.cell_len for label in labels.values()) + 2
@@ -820,41 +857,31 @@ def pace_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text
     if plot_width < 10:
         return Text()
 
-    def dot_row(value: int) -> int:
-        return zero * 4 - round(value / step * per_step * 4)
-
     cells = [[0] * plot_width for _ in range(rows)]
     colors = [[RULE] * plot_width for _ in range(rows)]
-
-    def dot(x: int, y: int, color: str) -> None:
-        cells[y // 4][x // 2] |= DOTS[x % 2][y % 4]
-        colors[y // 4][x // 2] = color
-
     columns = plot_width * 2
-    for x in range(0, columns, 3):
-        dot(x, dot_row(0), RULE)
-    previous = None
-    for x in range(columns):
-        moment = start + (end - start) * x / (columns - 1)
-        if moment > stop:
-            break
-        value = pace_at(plan, moment)
-        if value is None:
-            previous = None
-            continue
-        y = dot_row(value)
-        # a vertical run joins a jump at a tally
-        joined = y if previous is None else previous
-        for run in range(min(y, joined), max(y, joined) + 1):
-            dot(x, run, BLUE)
-        previous = y
+    for trace in traces:
+        previous = None
+        for x in range(0, columns, 3 if trace.dotted else 1):
+            moment = start + (end - start) * x / (columns - 1)
+            if moment > trace.until:
+                break
+            value = trace.value(moment)
+            if value is None:
+                previous = None
+                continue
+            y = zero * 4 - round(value / step * per_step * 4)
+            joined = y if previous is None else previous
+            for run in range(min(y, joined), max(y, joined) + 1):
+                cells[run // 4][x // 2] |= DOTS[x % 2][run % 4]
+                colors[run // 4][x // 2] = trace.color
+            if not trace.dotted:
+                previous = y
 
     lines = []
     for row in range(rows):
-        label = labels.get(row, Text())
-        line = Text.assemble(
-            " " * (left - 2 - label.cell_len), label, "  ", style=MUTED
-        )
+        text = labels.get(row, Text())
+        line = Text.assemble(" " * (left - 2 - text.cell_len), text, "  ", style=MUTED)
         for cell, color in zip(cells[row], colors[row], strict=True):
             line.append(chr(0x2800 + cell) if cell else " ", style=color)
         lines.append(line)
@@ -862,8 +889,74 @@ def pace_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text
     return Text("\n").join(lines)
 
 
+def pace_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text:
+    """Pace from the first scheduled minute to the last, drawn up to now."""
+    bounds = schedule_bounds(plan, now)
+    if isinstance(bounds, Text):
+        return bounds
+    start, end, stop = bounds
+    # pace falls steadily between tallies, so its extremes are at the ends and on
+    # either side of each tally
+    moments = [start, stop]
+    for tally in plan.tallies:
+        if start < tally.at <= stop:
+            moments += [tally.at - timedelta(seconds=1), tally.at]
+    values = [v for v in (pace_at(plan, m) for m in moments) if v is not None]
+    traces = (
+        Trace(lambda moment: 0, end, RULE, dotted=True),
+        Trace(lambda moment: pace_at(plan, moment), stop, BLUE),
+    )
+    low, high = min(values, default=0), max(values, default=0)
+    return plot(start, end, width, height, low, high, PACE_STEPS, signed, traces)
+
+
+def points_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text:
+    """Earned and available points from the first scheduled minute to the last,
+    drawn up to now, over the points that would make pace zero, drawn to the end."""
+    bounds = schedule_bounds(plan, now)
+    if isinstance(bounds, Text):
+        return bounds
+    start, end, stop = bounds
+    # tallies after now are possible only when the clock goes back, but the zero pace
+    # line would still reach them
+    totals = [t.available for t in plan.tallies if start < t.at <= end]
+    if (first := tally_at(plan, start)) is not None:
+        totals.append(first.available)
+
+    def earned(moment: datetime) -> Fraction | None:
+        tally = tally_at(plan, moment)
+        return None if tally is None else tally.earned
+
+    def available(moment: datetime) -> Fraction | None:
+        tally = tally_at(plan, moment)
+        return None if tally is None else tally.available
+
+    traces = (
+        Trace(lambda moment: on_pace_at(plan, moment), end, RULE, dotted=True),
+        Trace(available, stop, OVERLAY2),
+        Trace(earned, stop, BLUE),
+    )
+    high = max(totals, default=0)
+    return plot(
+        start,
+        end,
+        width,
+        height,
+        0,
+        high,
+        POINT_STEPS,
+        lambda p: Text(str(p)),
+        traces,
+        zero_at_bottom=True,
+    )
+
+
+# the graphs v shows after the tasks, in turn, by the ids of their views
+GRAPHS = {"pace": pace_graph, "points": points_graph}
+
+
 class ListArea(ContentSwitcher):
-    """The task list, or the pace graph in its place. Its keys work in both."""
+    """The task list, or a graph in its place. Its keys work in all of them."""
 
     # Screen binds tab to focus_next, which runs before app bindings, and a priority
     # binding would also catch tab in dialogs
@@ -950,7 +1043,7 @@ HELP = (
                 ("T", "open a date, or the spans"),
                 ("c", "replace this list with another's"),
                 ("@", "edit the schedule, or a span's title and time"),
-                ("v", "show the pace graph, or the tasks again"),
+                ("v", "cycle the pace graph, points graph and tasks"),
             ),
         ),
         ("App", (("?", "show this list"), ("q", "quit"))),
@@ -1868,7 +1961,7 @@ class TodoApp(App):
         Binding("[", "shift(-1)", "previous", show=False),
         Binding("]", "shift(1)", "next", show=False),
         Binding("t", "today", "today", show=False),
-        Binding("v", "toggle_graph", "graph", show=False),
+        Binding("v", "cycle_view", "graphs", show=False),
         # no room in the footer at 80 columns
         Binding("q", "quit", "quit", show=False),
     ]
@@ -1937,7 +2030,8 @@ class TodoApp(App):
             yield Static("", id="totals")
         with ListArea(initial="task-pane"):
             yield TaskPane(id="task-pane")
-            yield GraphView(id="graph")
+            for name in GRAPHS:
+                yield GraphView(id=name)
         yield Footer(compact=True)
 
     def on_mount(self) -> None:
@@ -2055,17 +2149,19 @@ class TodoApp(App):
             return
         now = datetime.now()
         self.query_one("#totals", Static).update(Summary(self.plan, now))
-        if self.query_one(ListArea).current == "graph":
-            self.query_one("#graph", Static).update(PaceGraph(self.plan, now))
+        current = self.query_one(ListArea).current
+        if (draw := GRAPHS.get(current or "")) is not None:
+            graph = Graph(draw, self.plan, now)
+            self.query_one(f"#{current}", GraphView).update(graph)
 
-    def action_toggle_graph(self) -> None:
+    def action_cycle_view(self) -> None:
         area = self.query_one(ListArea)
-        if area.current == "graph":
-            area.current = "task-pane"
+        views = ["task-pane", *GRAPHS]
+        area.current = views[(views.index(area.current or "") + 1) % len(views)]
+        if area.current == "task-pane":
             self.query_one("#tasks", VimList).focus()
         else:
-            area.current = "graph"
-            self.query_one(GraphView).focus()
+            self.query_one(f"#{area.current}", GraphView).focus()
         self.refresh_stats()
 
     @on(TaskList.MenuRequested)

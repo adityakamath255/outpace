@@ -30,6 +30,7 @@ from todo.app import (
     header_row,
     main,
     pace_graph,
+    points_graph,
     schedule_row,
     subtotal_row,
 )
@@ -366,12 +367,25 @@ def test_the_graph_fits_a_span_weeks_behind():
     assert len(lines) == 12
 
 
-def test_v_swaps_the_tasks_for_the_graph_where_task_keys_do_nothing(app):
+def test_the_points_graph_shows_where_to_be_until_the_schedule_ends():
+    # seven points leave rows to spare
+    tallies = (Tally(datetime(2026, 11, 1, 8), Fraction(1), Fraction(7)),)
+    day = Day(date(2026, 11, 1), (Interval(8 * 60, 12 * 60),), (Section(""),), tallies)
+    *plot, _ = points_graph(day, datetime(2026, 11, 1, 9), 80, 12).plain.splitlines()
+    drawn = [i for line in plot for i, c in enumerate(line) if "\u2800" < c <= "\u28ff"]
+    # an hour in: earned and available end a quarter of the way along, while the
+    # zero pace line goes on to the end
+    assert max(drawn) > 70
+    # points are never negative, so zero takes the bottom row
+    assert plot[-1].lstrip().startswith("0 ")
+
+
+def test_v_swaps_the_tasks_for_each_graph_where_task_keys_do_nothing(app):
     async def view():
         async with app.run_test() as pilot:
             await pilot.press("space")
             await pilot.press("v")
-            assert app.query_one("#graph").display
+            assert app.query_one("#pace").display
             assert not app.query_one("#task-pane").display
             before = app.day
             await pilot.press("space", "x", "o")
@@ -383,6 +397,11 @@ def test_v_swaps_the_tasks_for_the_graph_where_task_keys_do_nothing(app):
             await pilot.press("tab")
             assert isinstance(app.screen, SpanEditor)
             await pilot.press("escape", "v")
+            assert app.query_one("#points").display
+            unchanged = app.day
+            await pilot.press("space", "x")
+            assert app.day == unchanged
+            await pilot.press("v")
             assert app.query_one("#task-pane").display
             assert isinstance(app.focused, VimList)
 

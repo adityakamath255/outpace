@@ -474,15 +474,21 @@ def progress(scheduled: int, earned: Fraction, available: Fraction) -> int:
     return int(scheduled * earned / available)
 
 
-def pace_at(plan: Day | Span, moment: datetime) -> int | None:
-    """Seconds ahead of the schedule at moment, as the summary's pace counts them,
-    from the last tally at or before it. None before the first tally, and without
-    points or a schedule."""
+def tally_at(plan: Day | Span, moment: datetime) -> Tally | None:
+    """The last tally at or before moment, or None before the first."""
     tally = None
     for candidate in plan.tallies:
         if candidate.at > moment:
             break
         tally = candidate
+    return tally
+
+
+def pace_at(plan: Day | Span, moment: datetime) -> int | None:
+    """Seconds ahead of the schedule at moment, as the summary's pace counts them,
+    from the last tally at or before it. None before the first tally, and without
+    points or a schedule."""
+    tally = tally_at(plan, moment)
     if tally is None or not tally.available:
         return None
     elapsed, scheduled = time_progress(
@@ -491,6 +497,21 @@ def pace_at(plan: Day | Span, moment: datetime) -> int | None:
     if not scheduled:
         return None
     return progress(scheduled, tally.earned, tally.available) - elapsed
+
+
+def on_pace_at(plan: Day | Span, moment: datetime) -> Fraction | None:
+    """The points that would make pace zero at moment: the available points of the
+    last tally at or before it, in the share of the schedule elapsed. None before the
+    first tally, and without a schedule."""
+    tally = tally_at(plan, moment)
+    if tally is None:
+        return None
+    elapsed, scheduled = time_progress(
+        plan.intervals, seconds_since(plan.origin, moment)
+    )
+    if not scheduled:
+        return None
+    return tally.available * elapsed / scheduled
 
 
 def empty_day(day: date) -> Day:

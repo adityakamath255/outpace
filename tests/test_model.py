@@ -14,6 +14,7 @@ from todo.model import (
     days_text,
     empty_day,
     number,
+    on_pace_at,
     pace_at,
     parse_clock,
     parse_days,
@@ -303,6 +304,26 @@ def test_pace_at_a_moment_comes_from_the_last_tally_against_the_schedule():
     after = replace(day, tallies=tallies[:2])
     assert pace_at(after, datetime(2026, 11, 1, 13)) == -HOUR
     assert pace_at(replace(after, intervals=()), datetime(2026, 11, 1, 9)) is None
+
+
+def test_on_pace_points_follow_the_total_and_the_schedule():
+    tallies = (
+        Tally(datetime(2026, 11, 1, 7), Fraction(0), Fraction(4)),
+        Tally(datetime(2026, 11, 1, 9), Fraction(1), Fraction(8)),
+    )
+    # four scheduled hours, with a break from 10:00 to 11:00
+    intervals = (Interval(8 * 60, 10 * 60), Interval(11 * 60, 13 * 60))
+    day = Day(DAY, intervals, (Section(""),), tallies)
+    moments = [(6, 0), (8, 30), (10, 0), (10, 30), (12, 0)]
+    assert [on_pace_at(day, datetime(2026, 11, 1, h, m)) for h, m in moments] == [
+        None,
+        # the total before 9:00, then the latest one, through the break and on past
+        # the last tally
+        Fraction(1, 2),
+        4,
+        4,
+        6,
+    ]
 
 
 def test_percentages_truncate_and_per_point_needs_points():
