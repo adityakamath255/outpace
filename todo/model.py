@@ -463,7 +463,8 @@ class Span(Plan):
 
 def tallied(plan: Day | Span, now: datetime) -> Day | Span:
     """plan with a tally of its points as of now added, unless the points equal the
-    last tally's. A list without tallies counts as having had no points."""
+    last tally's. A list without tallies counts as having had no points. A clock set
+    back stamps the tally at the last one's time, so tallies stay in order."""
     earned, available = score(plan.tasks())
     last = (
         (plan.tallies[-1].earned, plan.tallies[-1].available)
@@ -472,7 +473,8 @@ def tallied(plan: Day | Span, now: datetime) -> Day | Span:
     )
     if (earned, available) == last:
         return plan
-    return replace(plan, tallies=(*plan.tallies, Tally(now, earned, available)))
+    at = max(now, plan.tallies[-1].at) if plan.tallies else now
+    return replace(plan, tallies=(*plan.tallies, Tally(at, earned, available)))
 
 
 def progress(scheduled: int, earned: Fraction, available: Fraction) -> int:

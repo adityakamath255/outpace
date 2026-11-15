@@ -285,6 +285,16 @@ def test_a_tally_is_kept_only_when_the_points_change():
     assert tallied(empty, at) == empty
 
 
+def test_a_clock_set_back_stamps_the_tally_at_the_last_one():
+    day = replace(empty_day(DAY), sections=(Section("", (Task("a", points("2")),)),))
+    at = datetime(2026, 11, 1, 9)
+    counted = tallied(day, at)
+    done = replace(counted, sections=(Section("", (next(counted.tasks()).toggle(),)),))
+    assert tallied(done, at - timedelta(minutes=5)).tallies[-1] == Tally(
+        at, Fraction(2), Fraction(2)
+    )
+
+
 def test_pace_at_a_moment_comes_from_the_last_tally_against_the_schedule():
     tallies = (
         Tally(datetime(2026, 11, 1, 7), Fraction(1), Fraction(4)),
