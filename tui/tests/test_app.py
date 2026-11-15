@@ -1302,6 +1302,22 @@ def test_a_new_span_takes_whole_dates_and_at_edits_its_time_and_days_off(app):
     asyncio.run(create())
 
 
+def test_the_span_dialog_total_leaves_out_days_off(app):
+    async def total():
+        async with app.run_test(size=(120, 35)) as pilot:
+            await pilot.press("tab")
+            for selector, value in {
+                "from-date": "2026-11-06",
+                "to-date": "2026-11-08",
+                "span-off": "2026-11-07",
+            }.items():
+                app.screen.query_one(f"#{selector}", Input).value = value
+            await pilot.pause()
+            assert str(app.screen.query_one("#hint", Static).content) == "2d"
+
+    asyncio.run(total())
+
+
 def test_the_picker_deletes_spans_moving_on_and_restores_them(app):
     first, second = week("first"), week("second", datetime(2026, 11, 9))
     app.store.save(first)

@@ -1749,35 +1749,36 @@ class SpanEditor(Form):
             yield Static("", id="error", markup=False)
             yield save_and_cancel("", "add" if span is None else "save")
 
-    def read(self) -> tuple[datetime, datetime]:
+    def read(self) -> tuple[datetime, datetime, tuple[date, ...]]:
         def value(selector: str) -> str:
             return self.query_one(selector, Input).value
 
         start = read_moment("From", value("#from-date"), value("#from-time"), end=False)
         end = read_moment("To", value("#to-date"), value("#to-time"), end=True)
-        return start, end
+        try:
+            off = parse_days(value("#span-off"))
+        except ValueError as error:
+            raise ValueError(f"Days off: {error}") from None
+        return start, end, off
 
     def on_mount(self) -> None:
         self.update_length()
 
     @on(Input.Changed)
     def update_length(self) -> None:
+        """Shows the span's counted time, without its days off, or nothing until the
+        fields make a valid span."""
         try:
-            start, end = self.read()
+            start, end, off = self.read()
+            span = Span("", start, end, (Section(""),), off=off)
         except ValueError:
             length = Text()
         else:
-            length = (
-                duration(int((end - start).total_seconds())) if end > start else Text()
-            )
+            length = duration(sum(i.seconds for i in span.intervals))
         self.query_one("#hint", Static).update(length)
 
     def save(self) -> None:
-        start, end = self.read()
-        try:
-            off = parse_days(self.query_one("#span-off", Input).value)
-        except ValueError as error:
-            raise ValueError(f"Days off: {error}") from None
+        start, end, off = self.read()
         self.on_submit(self.query_one("#span-title", Input).value, start, end, off)
         self.dismiss()
 
