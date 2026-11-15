@@ -364,8 +364,8 @@ def test_points_changes_are_tallied_and_undo_and_redo_take_the_tally_along(app):
 def test_the_graph_joins_a_fall_from_its_top_row():
     # +1h at 08:00, then new points drop pace below zero a minute later
     tallies = (
-        Tally(datetime(2026, 11, 1, 7), Fraction(1), Fraction(1)),
-        Tally(datetime(2026, 11, 1, 8, 1), Fraction(1), Fraction(100)),
+        Tally(datetime(2026, 11, 1, 7).astimezone(), Fraction(1), Fraction(1)),
+        Tally(datetime(2026, 11, 1, 8, 1).astimezone(), Fraction(1), Fraction(100)),
     )
     day = Day(date(2026, 11, 1), (Interval(8 * 60, 9 * 60),), (Section(""),), tallies)
     plot = pace_graph(day, datetime(2026, 11, 1, 9), 80, 12).plain.splitlines()[:-1]
@@ -380,7 +380,7 @@ def test_the_graph_fits_a_span_weeks_behind():
         datetime(2026, 10, 1),
         datetime(2026, 11, 1),
         (Section(""),),
-        tallies=(Tally(datetime(2026, 10, 1), Fraction(0), Fraction(1)),),
+        tallies=(Tally(datetime(2026, 10, 1).astimezone(), Fraction(0), Fraction(1)),),
     )
     lines = pace_graph(span, datetime(2026, 10, 30), 80, 12).plain.splitlines()
     assert len(lines) == 12
@@ -388,7 +388,7 @@ def test_the_graph_fits_a_span_weeks_behind():
 
 def test_the_points_graph_shows_where_to_be_until_the_schedule_ends():
     # seven points leave rows to spare
-    tallies = (Tally(datetime(2026, 11, 1, 8), Fraction(1), Fraction(7)),)
+    tallies = (Tally(datetime(2026, 11, 1, 8).astimezone(), Fraction(1), Fraction(7)),)
     day = Day(date(2026, 11, 1), (Interval(8 * 60, 12 * 60),), (Section(""),), tallies)
     *plot, _ = points_graph(day, datetime(2026, 11, 1, 9), 80, 12).plain.splitlines()
     drawn = [i for line in plot for i, c in enumerate(line) if "\u2800" < c <= "\u28ff"]

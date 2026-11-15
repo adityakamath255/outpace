@@ -74,15 +74,51 @@ def test_a_second_session_cannot_open_the_database(tmp_path):
 def test_newer_database_is_not_modified(tmp_path):
     path = tmp_path / "todo.sqlite3"
     with closing(sqlite3.connect(path)) as connection, connection:
-        connection.execute("PRAGMA user_version = 4")
-    with pytest.raises(ValueError, match="version 4"):
+        connection.execute("PRAGMA user_version = 5")
+    with pytest.raises(ValueError, match="version 5"):
         Store(path)
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 5
+
+
+def test_version_3_tally_times_take_this_systems_utc_offset(tmp_path):
+    path = tmp_path / "todo.sqlite3"
+    naive = "2026-11-11T09:37:00.123456"
+    sections = '[{"id": "s", "title": "", "tasks": []}]'
+    tallies = f'[["{naive}", "1/2", "5"]]'
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("CREATE TABLE days (date TEXT PRIMARY KEY, data TEXT)")
+        connection.execute("CREATE TABLE spans (id TEXT PRIMARY KEY, data TEXT)")
+        connection.execute(
+            "INSERT INTO days VALUES (?, ?)",
+            (
+                DAY.isoformat(),
+                f'{{"intervals": [], "sections": {sections}, "tallies": {tallies}}}',
+            ),
+        )
+        connection.execute(
+            "INSERT INTO spans VALUES ('week', ?)",
+            (
+                '{"title": "", "start": "2026-11-09T00:00", "end": "2026-11-16T00:00", '
+                f'"sections": {sections}, "tallies": {tallies}}}',
+            ),
+        )
+        connection.execute("PRAGMA user_version = 3")
+    at = datetime.fromisoformat(naive).astimezone()
+    expected = (Tally(at, Fraction(1, 2), Fraction(5)),)
+    with closing(Store(path)) as store:
+        assert store.load(DAY).tallies == expected
+        assert store.spans()[0].tallies == expected
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_tallies_and_days_off_survive_a_save_and_older_spans_have_neither(tmp_path):
-    tallies = (Tally(datetime(2026, 11, 6, 11, 2, 5), Fraction(1, 2), Fraction(2)),)
+    tallies = (
+        Tally(
+            datetime(2026, 11, 6, 11, 2, 5).astimezone(), Fraction(1, 2), Fraction(2)
+        ),
+    )
     span = Span(
         "november",
         datetime(2026, 11, 6, 10, 30),

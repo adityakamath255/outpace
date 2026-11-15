@@ -872,8 +872,8 @@ def pace_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Text
     # either side of each tally
     moments = [start, stop]
     for tally in plan.tallies:
-        if start < tally.at <= stop:
-            moments += [tally.at - timedelta(seconds=1), tally.at]
+        if start < tally.local <= stop:
+            moments += [tally.local - timedelta(seconds=1), tally.local]
     values = [v for v in (pace_at(plan, m) for m in moments) if v is not None]
     traces = (
         Trace(lambda moment: 0, end, RULE, dotted=True),
@@ -892,7 +892,7 @@ def points_graph(plan: Day | Span, now: datetime, width: int, height: int) -> Te
     start, end, stop = bounds
     # tallies after now are possible only when the clock goes back, but the zero pace
     # line would still reach them
-    totals = [t.available for t in plan.tallies if start < t.at <= end]
+    totals = [t.available for t in plan.tallies if start < t.local <= end]
     if (first := tally_at(plan, start)) is not None:
         totals.append(first.available)
 

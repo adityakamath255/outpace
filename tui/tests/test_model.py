@@ -278,7 +278,7 @@ def test_a_tally_is_kept_only_when_the_points_change():
     day = replace(empty_day(DAY), sections=(Section("", (Task("a", points("2")),)),))
     at = datetime(2026, 11, 1, 9, 0, 0, 500)
     counted = tallied(day, at)
-    assert counted.tallies == (Tally(at, Fraction(0), Fraction(2)),)
+    assert counted.tallies == (Tally(at.astimezone(), Fraction(0), Fraction(2)),)
     assert tallied(counted, at + timedelta(hours=1)) == counted
     # a list without points has nothing to graph
     empty = empty_day(DAY)
@@ -291,15 +291,15 @@ def test_a_clock_set_back_stamps_the_tally_at_the_last_one():
     counted = tallied(day, at)
     done = replace(counted, sections=(Section("", (next(counted.tasks()).toggle(),)),))
     assert tallied(done, at - timedelta(minutes=5)).tallies[-1] == Tally(
-        at, Fraction(2), Fraction(2)
+        at.astimezone(), Fraction(2), Fraction(2)
     )
 
 
 def test_pace_at_a_moment_comes_from_the_last_tally_against_the_schedule():
     tallies = (
-        Tally(datetime(2026, 11, 1, 7), Fraction(1), Fraction(4)),
-        Tally(datetime(2026, 11, 1, 10), Fraction(3), Fraction(4)),
-        Tally(datetime(2026, 11, 1, 11), Fraction(0), Fraction(0)),
+        Tally(datetime(2026, 11, 1, 7).astimezone(), Fraction(1), Fraction(4)),
+        Tally(datetime(2026, 11, 1, 10).astimezone(), Fraction(3), Fraction(4)),
+        Tally(datetime(2026, 11, 1, 11).astimezone(), Fraction(0), Fraction(0)),
     )
     day = Day(DAY, (Interval(8 * 60, 12 * 60),), (Section(""),), tallies)
     hours = [6, 8, 9, 10]
@@ -318,8 +318,8 @@ def test_pace_at_a_moment_comes_from_the_last_tally_against_the_schedule():
 
 def test_on_pace_points_follow_the_total_and_the_schedule():
     tallies = (
-        Tally(datetime(2026, 11, 1, 7), Fraction(0), Fraction(4)),
-        Tally(datetime(2026, 11, 1, 9), Fraction(1), Fraction(8)),
+        Tally(datetime(2026, 11, 1, 7).astimezone(), Fraction(0), Fraction(4)),
+        Tally(datetime(2026, 11, 1, 9).astimezone(), Fraction(1), Fraction(8)),
     )
     # four scheduled hours, with a break from 10:00 to 11:00
     intervals = (Interval(8 * 60, 10 * 60), Interval(11 * 60, 13 * 60))

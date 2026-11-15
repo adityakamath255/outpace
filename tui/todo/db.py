@@ -7,7 +7,7 @@ from typing import Any
 
 from .model import Day, Interval, Section, Span, Tally, Task, empty_day
 
-VERSION = 3
+VERSION = 4
 
 
 def encode_sections(sections: tuple[Section, ...]) -> list[dict[str, Any]]:
@@ -117,6 +117,21 @@ def decode_span(span_id: str, text: str) -> Span:
     )
 
 
+def add_tally_offsets(connection: sqlite3.Connection) -> None:
+    """Migrates version 3, whose tally times are local to this system without an
+    offset, to version 4, which stores the offset."""
+    for table, key in (("days", "date"), ("spans", "id")):
+        rows = connection.execute(f"SELECT {key}, data FROM {table}").fetchall()
+        for row_key, text in rows:
+            data = json.loads(text)
+            for tally in data.get("tallies", []):
+                tally[0] = datetime.fromisoformat(tally[0]).astimezone().isoformat()
+            connection.execute(
+                f"UPDATE {table} SET data = ? WHERE {key} = ?",
+                (json.dumps(data, ensure_ascii=False), row_key),
+            )
+
+
 class Store:
     """One JSON document per day, keyed by ISO date, and one per span, keyed by id.
     Holds the database exclusively until closed. Blank days aren't stored, so loading
@@ -146,6 +161,8 @@ class Store:
                     self.connection.execute(
                         "CREATE TABLE spans (id TEXT PRIMARY KEY, data TEXT NOT NULL)"
                     )
+                elif version == 3:
+                    add_tally_offsets(self.connection)
                 elif version != VERSION:
                     raise ValueError(
                         f"Unsupported database version {version}; expected {VERSION}."

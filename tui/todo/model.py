@@ -241,11 +241,21 @@ def seconds_since(origin: datetime, now: datetime) -> int:
 
 @dataclass(frozen=True)
 class Tally:
-    """A list's earned and available points as of a moment."""
+    """A list's earned and available points as of an instant. at carries its UTC
+    offset, so tallies keep their order across a change of time zone."""
 
     at: datetime
     earned: Fraction
     available: Fraction
+
+    def __post_init__(self) -> None:
+        if self.at.utcoffset() is None:
+            raise ValueError("A tally's time needs a UTC offset.")
+
+    @property
+    def local(self) -> datetime:
+        """at as a local time in this system's zone, comparable with schedules."""
+        return self.at.astimezone().replace(tzinfo=None)
 
 
 class Plan:
@@ -463,8 +473,9 @@ class Span(Plan):
 
 def tallied(plan: Day | Span, now: datetime) -> Day | Span:
     """plan with a tally of its points as of now added, unless the points equal the
-    last tally's. A list without tallies counts as having had no points. A clock set
-    back stamps the tally at the last one's time, so tallies stay in order."""
+    last tally's. A list without tallies counts as having had no points. now is a
+    local time in this system's zone. A clock set back stamps the tally at the last
+    one's time, so tallies stay in order."""
     earned, available = score(plan.tasks())
     last = (
         (plan.tallies[-1].earned, plan.tallies[-1].available)
@@ -473,7 +484,9 @@ def tallied(plan: Day | Span, now: datetime) -> Day | Span:
     )
     if (earned, available) == last:
         return plan
-    at = max(now, plan.tallies[-1].at) if plan.tallies else now
+    at = now.astimezone()
+    if plan.tallies:
+        at = max(at, plan.tallies[-1].at)
     return replace(plan, tallies=(*plan.tallies, Tally(at, earned, available)))
 
 
@@ -484,9 +497,10 @@ def progress(scheduled: int, earned: Fraction, available: Fraction) -> int:
 
 
 def tally_at(plan: Day | Span, moment: datetime) -> Tally | None:
-    """The last tally at or before moment, or None before the first. Tallies are in
-    time order."""
-    index = bisect_right(plan.tallies, moment, key=lambda tally: tally.at)
+    """The last tally at or before moment, a local time in this system's zone, or
+    None before the first. Tallies are in time order."""
+    instant = moment.astimezone()
+    index = bisect_right(plan.tallies, instant, key=lambda tally: tally.at)
     return plan.tallies[index - 1] if index else None
 
 
