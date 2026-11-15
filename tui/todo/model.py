@@ -580,3 +580,90 @@ def percentage(value: Fraction) -> str:
 def per_point(seconds: int | Fraction, available: Fraction) -> int | None:
     """Whole seconds per point, or None without points."""
     return int(Fraction(seconds) / available) if available else None
+
+
+def timed(tasks: Iterable[Task]) -> tuple[Task, ...]:
+    """The scored tasks with a duration, the ones a duration per point counts."""
+    return tuple(t for t in tasks if t.minutes and t.available is not None)
+
+
+def completion(task: Task) -> Fraction | None:
+    if task.available is None:
+        return None
+    return task.earned / task.available
+
+
+def duration_per_point(task: Task) -> Fraction | None:
+    if task.minutes is None or task.available is None:
+        return None
+    return task.minutes / task.available
+
+
+@dataclass(frozen=True)
+class Figures:
+    """Totals of some tasks and, for a list, of its schedule as of a moment, before
+    formatting. Times are in seconds; without a schedule, elapsed and scheduled are
+    0. The timed totals count only timed tasks."""
+
+    earned: Fraction
+    available: Fraction
+    worked: Fraction
+    needed: Fraction
+    timed_available: Fraction
+    timed_needed: Fraction
+    # scored tasks without a duration
+    undurated: int
+    elapsed: int
+    scheduled: int
+
+    @property
+    def progress(self) -> int | None:
+        if not (self.scheduled and self.available):
+            return None
+        return progress(self.scheduled, self.earned, self.available)
+
+    @property
+    def pace(self) -> int | None:
+        worth = self.progress
+        return None if worth is None else worth - self.elapsed
+
+    @property
+    def free(self) -> Fraction | None:
+        """The share of the schedule left after task durations, negative when they
+        overrun it."""
+        if not (self.scheduled and self.needed):
+            return None
+        return (self.scheduled - self.needed) / self.scheduled
+
+    @property
+    def schedule_per_point(self) -> int | None:
+        return per_point(self.scheduled, self.available) if self.scheduled else None
+
+    @property
+    def duration_per_point(self) -> int | None:
+        return per_point(self.timed_needed, self.timed_available)
+
+
+def figures(
+    tasks: Iterable[Task], intervals: tuple[Interval, ...] = (), now: int = 0
+) -> Figures:
+    """The figures of tasks against intervals, now being seconds_since the list's
+    origin."""
+    tasks = tuple(tasks)
+    earned, available = score(tasks)
+    worked, needed = work(tasks)
+    timed_tasks = timed(tasks)
+    _, timed_available = score(timed_tasks)
+    _, timed_needed = work(timed_tasks)
+    elapsed, scheduled = time_progress(intervals, now)
+    return Figures(
+        earned,
+        available,
+        worked,
+        needed,
+        timed_available,
+        timed_needed,
+        sum(t.minutes is None and t.available is not None for t in tasks),
+        elapsed,
+        scheduled,
+    )

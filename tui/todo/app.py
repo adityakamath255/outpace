@@ -35,12 +35,16 @@ from textual.widgets.option_list import Option
 from .db import Store
 from .model import (
     Day,
+    Figures,
     Interval,
     Section,
     Span,
     Task,
     clock,
+    completion,
     days_text,
+    duration_per_point,
+    figures,
     fresh_copy,
     interval_text,
     minutes_text,
@@ -54,14 +58,12 @@ from .model import (
     per_point,
     percentage,
     points,
-    progress,
     schedule,
     score,
     seconds_since,
     tallied,
     tally_at,
-    time_progress,
-    work,
+    timed,
 )
 
 # catppuccin macchiato
@@ -139,22 +141,6 @@ def duration(seconds: int) -> Text:
 def rate(seconds: int | Fraction, available: Fraction) -> Text:
     value = per_point(seconds, available)
     return Text("-") if value is None else duration(value)
-
-
-def timed(tasks: tuple[Task, ...]) -> tuple[Task, ...]:
-    return tuple(t for t in tasks if t.minutes and t.available is not None)
-
-
-def completion(task: Task) -> Fraction | None:
-    if task.available is None:
-        return None
-    return task.earned / task.available
-
-
-def duration_per_point(task: Task) -> Fraction | None:
-    if task.minutes is None or task.available is None:
-        return None
-    return task.minutes / task.available
 
 
 class Column(NamedTuple):
@@ -434,13 +420,11 @@ class SectionRule:
 def subtotal_row(section: Section, slots: tuple[Slot, ...]) -> Table | None:
     """A section's totals, or None when it has neither points nor durations. Work per
     point counts only tasks with both."""
-    earned, available = score(section.tasks)
-    minutes = sum(task.minutes or 0 for task in section.tasks)
-    if not available and not minutes:
+    totals = figures(section.tasks)
+    earned, available, needed = totals.earned, totals.available, int(totals.needed)
+    if not available and not needed:
         return None
-    timed_tasks = timed(section.tasks)
-    _, timed_points = score(timed_tasks)
-    _, timed_seconds = work(timed_tasks)
+    rate_value = totals.duration_per_point
     style = "bold"
     title = Text("subtotal", style=style)
     if available:
@@ -455,9 +439,9 @@ def subtotal_row(section: Section, slots: tuple[Slot, ...]) -> Table | None:
             if available
             else Text(),
             # .plain drops the units' colour
-            DURATION: Text(duration(minutes * 60).plain, style) if minutes else "",
-            DURATION_PER_POINT: Text(rate(timed_seconds, timed_points).plain, style)
-            if timed_tasks
+            DURATION: Text(duration(needed).plain, style) if needed else "",
+            DURATION_PER_POINT: Text(duration(rate_value).plain, style)
+            if rate_value is not None
             else "",
         },
         title,
@@ -501,12 +485,11 @@ class Bar(NamedTuple):
     color: str
 
 
-def bars(plan: Day | Span, elapsed: int) -> tuple[Bar, ...]:
+def bars(totals: Figures) -> tuple[Bar, ...]:
     """A bar each for time, points and work, leaving out those without a total."""
-    tasks = tuple(plan.tasks())
-    earned, available = score(tasks)
-    _, scheduled = time_progress(plan.intervals, 0)
-    worked, needed = work(tasks)
+    earned, available = totals.earned, totals.available
+    elapsed, scheduled = totals.elapsed, totals.scheduled
+    worked, needed = totals.worked, totals.needed
     found = []
     if scheduled:
         value = duration(elapsed) + " / " + duration(scheduled)
@@ -524,8 +507,9 @@ def value_width(plan: Day | Span) -> int:
     """Cells for the bars' values. Elapsed time gets the widest the schedule allows, so
     values keep their right edge while the clock runs; the rest change only with the
     list."""
-    _, scheduled = time_progress(plan.intervals, 0)
-    return max((bar.value.cell_len for bar in bars(plan, widest(scheduled))), default=0)
+    totals = figures(plan.tasks(), plan.intervals)
+    widest_bars = bars(replace(totals, elapsed=widest(totals.scheduled)))
+    return max((bar.value.cell_len for bar in widest_bars), default=0)
 
 
 def labelled(
@@ -600,53 +584,41 @@ class Summary:
     tasks' durations count as work that never gets done."""
 
     def __init__(self, plan: Day | Span, now: datetime):
-        tasks = tuple(plan.tasks())
-        earned, available = score(tasks)
-        elapsed, scheduled = time_progress(
-            plan.intervals, seconds_since(plan.origin, now)
-        )
-        _, needed = work(tasks)
-        timed_tasks = timed(tasks)
-        _, timed_available = score(timed_tasks)
-        _, timed_needed = work(timed_tasks)
-
+        totals = figures(plan.tasks(), plan.intervals, seconds_since(plan.origin, now))
         self.values = value_width(plan)
         # pace changes with the clock, so its column gets the widest it can be
         self.pace_width = (
-            len("-") + duration(widest(scheduled)).cell_len
-            if scheduled and available
+            len("-") + duration(widest(totals.scheduled)).cell_len
+            if totals.pace is not None
             else 0
         )
-        self.bars = bars(plan, elapsed)
+        self.bars = bars(totals)
 
-        progress_row = pace_row = free_row = None
-        if scheduled and available:
-            worth = progress(scheduled, earned, available)
-            progress_row = ("progress", duration(worth))
-            pace_row = ("pace", signed(worth - elapsed))
-        if scheduled and needed:
-            free = (scheduled - needed) / scheduled
-            style = YELLOW if free < 0 else ""
-            free_row = ("free", Text(f"{percentage(free)}%", style=style))
-        missing = sum(t.minutes is None and t.available is not None for t in tasks)
+        def figure(label: str, value: int | None) -> Figure | None:
+            return None if value is None else (label, duration(value))
+
+        free_row = None
+        if totals.free is not None:
+            style = YELLOW if totals.free < 0 else ""
+            free_row = ("free", Text(f"{percentage(totals.free)}%", style=style))
+        missing = totals.undurated
         # columns of two figures each
         self.columns: tuple[tuple[Figure | None, Figure | None], ...] = (
-            (progress_row, pace_row),
             (
-                (
+                figure("progress", totals.progress),
+                None if totals.pace is None else ("pace", signed(totals.pace)),
+            ),
+            (
+                figure(
                     "sched/pt" if isinstance(plan, Day) else "span/pt",
-                    rate(scheduled, available),
-                )
-                if scheduled and available
-                else None,
-                ("dur/pt", rate(timed_needed, timed_available))
-                if timed_available
-                else None,
+                    totals.schedule_per_point,
+                ),
+                figure("dur/pt", totals.duration_per_point),
             ),
             (
                 free_row,
                 Text(f"{missing} scored, no duration", style=MUTED)
-                if needed and missing
+                if totals.needed and missing
                 else None,
             ),
         )
