@@ -545,8 +545,12 @@ def progress_bar(progress: Fraction, color: str, length: int) -> Text:
 
     A glyph has one colour, so a one-cell gap separates the fill from the track, with
     the value at its middle. On a cell boundary the gap is two half cells, which add
-    up to one cell even when a cell is an odd number of pixels wide."""
+    up to one cell even when a cell is an odd number of pixels wide. Half a cell from
+    either end, the gap would leave nothing on its outer side and read as a missing
+    cell, so those values round down a further half cell."""
     middle = min(int(progress * length * 2), length * 2)
+    if middle in (1, length * 2 - 1):
+        middle -= 1
     if middle == 0:
         return Text("─" * length, style=RULE)
     if middle == length * 2:

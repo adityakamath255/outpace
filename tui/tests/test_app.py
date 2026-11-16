@@ -14,6 +14,7 @@ from textual.widgets import Footer, Input, Static
 
 from todo.app import (
     COLUMNS,
+    GREEN,
     LineButton,
     RowMenu,
     ScheduleEditor,
@@ -32,6 +33,7 @@ from todo.app import (
     main,
     pace_graph,
     points_graph,
+    progress_bar,
     schedule_row,
     subtotal_row,
 )
@@ -89,6 +91,14 @@ def test_section_share_is_not_truncated_and_is_hidden_at_all_points():
 
     assert "50.00% of points" in rule(points("10"))
     assert "of points" not in rule(points("5"))
+
+
+def test_a_progress_bar_neither_starts_nor_ends_with_its_gap():
+    length = 6
+    for halves in range(length * 2 + 1):
+        bar = progress_bar(Fraction(halves, length * 2), GREEN, length).plain
+        assert len(bar) == length
+        assert bar[0] != " " and bar[-1] != " ", halves
 
 
 def test_clock_callback_does_not_touch_widgets_after_shutdown(app):
